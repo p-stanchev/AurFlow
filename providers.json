@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Solana Foundation RPC",
+    "url": "https://api.mainnet-beta.solana.com",
+    "weight": 1
+  },
+  {
+    "name": "Project Serum RPC",
+    "url": "https://solana-api.projectserum.com",
+    "weight": 1
+  },
+  {
+    "name": "Ankr",
+    "url": "https://rpc.ankr.com/solana",
+    "weight": 1
+  },
+  {
+    "name": "PublicNode",
+    "url": "https://solana-rpc.publicnode.com",
+    "weight": 1
+  },
+  {
+    "name": "RPCFast",
+    "url": "https://solana-mainnet.rpcfast.com",
+    "weight": 1
+  },
+  {
+    "name": "Metaplex",
+    "url": "https://api.metaplex.solana.com",
+    "weight": 1
+  },
+  {
+    "name": "Blast",
+    "url": "https://solana.public.blastapi.io",
+    "weight": 1
+  },
+  {
+    "name": "GenesysGo",
+    "url": "https://ssc-dao.genesysgo.net",
+    "weight": 1
+  }
+]
