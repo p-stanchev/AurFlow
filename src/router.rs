@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use bytes::Bytes;
 use hyper::body::to_bytes;
 use hyper::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use hyper::service::{make_service_fn, service_fn};
@@ -12,6 +13,8 @@ use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::signal;
+use tokio::task::JoinSet;
+use tokio::time::sleep;
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -122,7 +125,7 @@ async fn handle_rpc(
         }
     }
 
-    let body = to_bytes(req.into_body()).await.map_err(|err| {
+    let body: Bytes = to_bytes(req.into_body()).await.map_err(|err| {
         (
             OrlbError::InvalidPayload(format!("failed to read request body: {err}")),
             None,
@@ -159,14 +162,19 @@ async fn handle_rpc(
 
     let method_label = metadata.method_label();
     let ranked = state.metrics.provider_ranked_list().await;
-    let mut providers: Vec<_> = ranked
-        .iter()
-        .filter(|(_, _, healthy)| *healthy)
-        .cloned()
-        .collect();
-    if providers.is_empty() {
-        providers = ranked.clone();
+    let mut healthy_candidates = Vec::new();
+    let mut all_candidates = Vec::new();
+    for (provider, _score, healthy) in ranked {
+        if healthy {
+            healthy_candidates.push(provider.clone());
+        }
+        all_candidates.push(provider);
     }
+    let providers: Vec<Provider> = if healthy_candidates.is_empty() {
+        all_candidates
+    } else {
+        healthy_candidates
+    };
     if providers.is_empty() {
         return Err((OrlbError::NoHealthyProviders, response_id));
     }
@@ -176,92 +184,226 @@ async fn handle_rpc(
     } else {
         1
     };
+    let hedge_enabled = state.config.hedge_requests && max_attempts > 1 && providers.len() > 1;
 
     let mut attempts = 0usize;
     let mut last_error = None;
     let mut last_status = None;
     let mut last_provider: Option<String> = None;
 
-    for (provider, _score, _healthy) in providers {
-        attempts += 1;
-        let start = Instant::now();
+    if hedge_enabled {
+        let mut join_set: JoinSet<(
+            Provider,
+            std::time::Duration,
+            anyhow::Result<reqwest::Response>,
+        )> = JoinSet::new();
+        for (idx, provider) in providers.iter().take(max_attempts).cloned().enumerate() {
+            let delay = if idx == 0 {
+                std::time::Duration::from_millis(0)
+            } else {
+                state.config.hedge_delay
+            };
+            if delay > std::time::Duration::from_millis(0) {
+                state.metrics.record_hedge("timer");
+            }
+            let client = state.client.clone();
+            let payload = body.clone();
+            join_set.spawn(async move {
+                if delay > std::time::Duration::from_millis(0) {
+                    sleep(delay).await;
+                }
+                let start = Instant::now();
+                let result = forward::send_request(&client, &provider, payload.as_ref()).await;
+                (provider, start.elapsed(), result)
+            });
+        }
 
-        match forward::send_request(&state.client, &provider, &body).await {
-            Ok(upstream) => {
-                let status = upstream.status();
-                let latency = start.elapsed();
+        let mut last_http_failure: Option<(Provider, reqwest::Response, std::time::Duration)> =
+            None;
 
-                if status.is_success() {
+        while let Some(result) = join_set.join_next().await {
+            attempts += 1;
+            match result {
+                Ok((provider, latency, Ok(upstream))) => {
+                    let status = upstream.status();
+                    if status.is_success() {
+                        let headers = upstream.headers().clone();
+                        let response_body = upstream.bytes().await.map_err(|err| {
+                            (
+                                OrlbError::Upstream(format!("failed to read upstream body: {err}")),
+                                response_id.clone(),
+                            )
+                        })?;
+
+                        state
+                            .metrics
+                            .record_request_success(&provider.name, &method_label, latency)
+                            .await;
+
+                        tracing::info!(
+                            provider = provider.name,
+                            latency_ms = latency.as_secs_f64() * 1000.0,
+                            status = %status,
+                            attempt = attempts,
+                            hedged = attempts > 1,
+                            "request served"
+                        );
+                        join_set.abort_all();
+                        return Ok(build_upstream_response(
+                            status,
+                            &headers,
+                            &provider,
+                            response_body,
+                            latency,
+                        ));
+                    }
+
+                    state
+                        .metrics
+                        .record_request_failure(
+                            &provider.name,
+                            &method_label,
+                            &format!("status_{}", status.as_u16()),
+                        )
+                        .await;
+                    last_status = Some(status);
+                    last_provider = Some(provider.name.clone());
+                    last_error = Some(format!("{} responded {}", provider.name, status));
+
+                    if forward::is_retryable_status(status)
+                        && attempts < max_attempts
+                        && !join_set.is_empty()
+                    {
+                        state.metrics.record_retry("status").await;
+                        last_http_failure = Some((provider, upstream, latency));
+                        continue;
+                    }
+
                     let headers = upstream.headers().clone();
-                    let response_body = upstream.bytes().await.map_err(|err| {
+                    let body_bytes = upstream.bytes().await.map_err(|err| {
                         (
                             OrlbError::Upstream(format!("failed to read upstream body: {err}")),
                             response_id.clone(),
                         )
                     })?;
+                    join_set.abort_all();
+                    return Ok(build_upstream_response(
+                        status, &headers, &provider, body_bytes, latency,
+                    ));
+                }
+                Ok((provider, _latency, Err(err))) => {
+                    state
+                        .metrics
+                        .record_request_failure(&provider.name, &method_label, "transport")
+                        .await;
+                    last_error = Some(format!("{} transport error: {err}", provider.name));
+                    last_provider = Some(provider.name.clone());
+                    if attempts < max_attempts && !join_set.is_empty() {
+                        state.metrics.record_retry("transport").await;
+                        continue;
+                    }
+                }
+                Err(join_err) => {
+                    last_error = Some(format!("hedged task join error: {join_err}"));
+                }
+            }
+        }
+
+        if let Some((provider, upstream, latency)) = last_http_failure {
+            let status = upstream.status();
+            let headers = upstream.headers().clone();
+            let body_bytes = upstream.bytes().await.map_err(|err| {
+                (
+                    OrlbError::Upstream(format!("failed to read upstream body: {err}")),
+                    response_id.clone(),
+                )
+            })?;
+            return Ok(build_upstream_response(
+                status, &headers, &provider, body_bytes, latency,
+            ));
+        }
+    } else {
+        for provider in providers {
+            attempts += 1;
+            let start = Instant::now();
+
+            match forward::send_request(&state.client, &provider, &body).await {
+                Ok(upstream) => {
+                    let status = upstream.status();
+                    let latency = start.elapsed();
+
+                    if status.is_success() {
+                        let headers = upstream.headers().clone();
+                        let response_body = upstream.bytes().await.map_err(|err| {
+                            (
+                                OrlbError::Upstream(format!("failed to read upstream body: {err}")),
+                                response_id.clone(),
+                            )
+                        })?;
+
+                        state
+                            .metrics
+                            .record_request_success(&provider.name, &method_label, latency)
+                            .await;
+
+                        tracing::info!(
+                            provider = provider.name,
+                            latency_ms = latency.as_secs_f64() * 1000.0,
+                            status = %status,
+                            attempt = attempts,
+                            "request served"
+                        );
+
+                        return Ok(build_upstream_response(
+                            status,
+                            &headers,
+                            &provider,
+                            response_body,
+                            latency,
+                        ));
+                    }
 
                     state
                         .metrics
-                        .record_request_success(&provider.name, &method_label, latency)
+                        .record_request_failure(
+                            &provider.name,
+                            &method_label,
+                            &format!("status_{}", status.as_u16()),
+                        )
                         .await;
 
-                    tracing::info!(
-                        provider = provider.name,
-                        latency_ms = latency.as_secs_f64() * 1000.0,
-                        status = %status,
-                        attempt = attempts,
-                        "request served"
-                    );
+                    if forward::is_retryable_status(status) && attempts < max_attempts {
+                        state.metrics.record_retry("status").await;
+                        last_error = Some(format!("{} responded {}", provider.name, status));
+                        last_status = Some(status);
+                        last_provider = Some(provider.name.clone());
+                        continue;
+                    }
 
+                    let headers = upstream.headers().clone();
+                    let body_bytes = upstream.bytes().await.map_err(|err| {
+                        (
+                            OrlbError::Upstream(format!("failed to read upstream body: {err}")),
+                            response_id.clone(),
+                        )
+                    })?;
                     return Ok(build_upstream_response(
-                        status,
-                        &headers,
-                        &provider,
-                        response_body,
-                        latency,
+                        status, &headers, &provider, body_bytes, latency,
                     ));
                 }
-
-                state
-                    .metrics
-                    .record_request_failure(
-                        &provider.name,
-                        &method_label,
-                        &format!("status_{}", status.as_u16()),
-                    )
-                    .await;
-
-                if forward::is_retryable_status(status) && attempts < max_attempts {
-                    state.metrics.record_retry("status").await;
-                    last_error = Some(format!("{} responded {}", provider.name, status));
-                    last_status = Some(status);
+                Err(err) => {
+                    state
+                        .metrics
+                        .record_request_failure(&provider.name, &method_label, "transport")
+                        .await;
+                    last_error = Some(format!("{} transport error: {err}", provider.name));
                     last_provider = Some(provider.name.clone());
-                    continue;
-                }
-
-                let headers = upstream.headers().clone();
-                let body_bytes = upstream.bytes().await.map_err(|err| {
-                    (
-                        OrlbError::Upstream(format!("failed to read upstream body: {err}")),
-                        response_id.clone(),
-                    )
-                })?;
-                return Ok(build_upstream_response(
-                    status, &headers, &provider, body_bytes, latency,
-                ));
-            }
-            Err(err) => {
-                state
-                    .metrics
-                    .record_request_failure(&provider.name, &method_label, "transport")
-                    .await;
-                last_error = Some(format!("{} transport error: {err}", provider.name));
-                last_provider = Some(provider.name.clone());
-                if attempts < max_attempts {
-                    state.metrics.record_retry("transport").await;
-                    continue;
-                } else {
-                    break;
+                    if attempts < max_attempts {
+                        state.metrics.record_retry("transport").await;
+                        continue;
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -505,12 +647,17 @@ mod tests {
             dashboard_assets_dir: None,
             slot_lag_penalty_ms: 5.0,
             slot_lag_alert_slots: 50,
+            hedge_requests: false,
+            hedge_delay: Duration::from_millis(60),
         }
     }
 
     async fn build_state(providers: Vec<Provider>) -> Arc<AppState> {
+        build_state_with_config(providers, test_config()).await
+    }
+
+    async fn build_state_with_config(providers: Vec<Provider>, config: Config) -> Arc<AppState> {
         let registry = Registry::from_providers(providers).unwrap();
-        let config = test_config();
         let metrics = Metrics::new(registry, &config).unwrap();
         let client = build_http_client(Duration::from_secs(5)).unwrap();
 
@@ -640,6 +787,85 @@ mod tests {
 
         assert!(primary_entry.errors >= 1);
         assert_eq!(secondary_entry.success, 1);
+    }
+
+    #[tokio::test]
+    async fn hedges_on_slow_primary() {
+        let primary = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(200))
+                    .set_body_json(json!({"jsonrpc":"2.0","result":42,"id":1})),
+            )
+            .expect(1)
+            .mount(&primary)
+            .await;
+
+        let secondary = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"jsonrpc":"2.0","result":9001,"id":1})),
+            )
+            .expect(1)
+            .mount(&secondary)
+            .await;
+
+        let providers = vec![
+            Provider {
+                name: "Slow".into(),
+                url: primary.uri(),
+                weight: 1,
+                headers: None,
+            },
+            Provider {
+                name: "Fast".into(),
+                url: secondary.uri(),
+                weight: 1,
+                headers: None,
+            },
+        ];
+
+        let mut config = test_config();
+        config.hedge_requests = true;
+        config.hedge_delay = Duration::from_millis(40);
+
+        let state = build_state_with_config(providers, config).await;
+        let payload = json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]});
+        let request = make_request(payload);
+
+        let response = handle_rpc(request, state.clone()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let headers = response.headers().clone();
+        assert_eq!(
+            headers
+                .get("x-orlb-provider")
+                .and_then(|value| value.to_str().ok()),
+            Some("Fast")
+        );
+
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed.get("result"), Some(&Value::from(9001)));
+
+        let snapshot = state.metrics.dashboard_snapshot().await;
+        let fast = snapshot
+            .providers
+            .iter()
+            .find(|p| p.name == "Fast")
+            .expect("fast provider snapshot");
+        assert_eq!(fast.success, 1);
+        let slow = snapshot
+            .providers
+            .iter()
+            .find(|p| p.name == "Slow")
+            .expect("slow provider snapshot");
+        assert_eq!(slow.success, 0);
+        assert_eq!(slow.errors, 0);
     }
 
     #[tokio::test]

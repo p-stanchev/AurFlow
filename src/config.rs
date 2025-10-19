@@ -16,6 +16,8 @@ pub struct Config {
     pub dashboard_assets_dir: Option<PathBuf>,
     pub slot_lag_penalty_ms: f64,
     pub slot_lag_alert_slots: u64,
+    pub hedge_requests: bool,
+    pub hedge_delay: Duration,
 }
 
 impl Config {
@@ -44,6 +46,12 @@ impl Config {
         );
         let slot_lag_alert_slots =
             parse_env("ORLB_SLOT_LAG_ALERT_SLOTS", "50", parse_u64)?.min(10_000);
+        let hedge_requests = parse_env("ORLB_HEDGE_REQUESTS", "false", parse_bool)?;
+        let hedge_delay = clamp_duration(
+            parse_env("ORLB_HEDGE_DELAY_MS", "60", parse_duration_millis)?,
+            Duration::from_millis(5),
+            Duration::from_millis(500),
+        );
 
         Ok(Self {
             listen_addr,
@@ -54,6 +62,8 @@ impl Config {
             dashboard_assets_dir,
             slot_lag_penalty_ms,
             slot_lag_alert_slots,
+            hedge_requests,
+            hedge_delay,
         })
     }
 }
@@ -93,6 +103,13 @@ fn parse_duration_secs(input: &str) -> Result<Duration> {
         .parse()
         .with_context(|| format!("invalid duration seconds `{input}`"))?;
     Ok(Duration::from_secs(secs))
+}
+
+fn parse_duration_millis(input: &str) -> Result<Duration> {
+    let ms: u64 = input
+        .parse()
+        .with_context(|| format!("invalid duration milliseconds `{input}`"))?;
+    Ok(Duration::from_millis(ms))
 }
 
 fn parse_f64(input: &str) -> Result<f64> {

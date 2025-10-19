@@ -35,6 +35,7 @@ pub struct Metrics {
     provider_health: IntGaugeVec,
     provider_slot: GaugeVec,
     provider_errors: IntCounterVec,
+    hedges: IntCounterVec,
     prometheus_registry: PromRegistry,
     state: Arc<RwLock<HashMap<String, ProviderState>>>,
     round_robin_cursor: Arc<AtomicUsize>,
@@ -132,6 +133,10 @@ impl Metrics {
             Opts::new("provider_errors_total", "Total provider errors"),
             &["provider", "kind"],
         )?;
+        let hedges = IntCounterVec::new(
+            Opts::new("hedges_total", "Hedged request launches by reason"),
+            &["reason"],
+        )?;
 
         prometheus_registry.register(Box::new(request_counter.clone()))?;
         prometheus_registry.register(Box::new(request_failures.clone()))?;
@@ -141,6 +146,7 @@ impl Metrics {
         prometheus_registry.register(Box::new(provider_health.clone()))?;
         prometheus_registry.register(Box::new(provider_slot.clone()))?;
         prometheus_registry.register(Box::new(provider_errors.clone()))?;
+        prometheus_registry.register(Box::new(hedges.clone()))?;
 
         let mut initial_state = HashMap::new();
         for provider in registry.providers() {
@@ -160,6 +166,7 @@ impl Metrics {
             provider_health,
             provider_slot,
             provider_errors,
+            hedges,
             prometheus_registry,
             state: Arc::new(RwLock::new(initial_state)),
             round_robin_cursor: Arc::new(AtomicUsize::new(0)),
@@ -491,6 +498,10 @@ impl Metrics {
         let output = String::from_utf8(buffer)?;
         Ok(output)
     }
+
+    pub fn record_hedge(&self, reason: &str) {
+        self.hedges.with_label_values(&[reason]).inc();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -597,6 +608,8 @@ mod tests {
             dashboard_assets_dir: None,
             slot_lag_penalty_ms: 10.0,
             slot_lag_alert_slots: 50,
+            hedge_requests: false,
+            hedge_delay: Duration::from_millis(60),
         }
     }
 
