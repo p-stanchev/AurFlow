@@ -1,5 +1,6 @@
 mod config;
 mod dashboard;
+mod doctor;
 mod errors;
 mod forward;
 mod health;
@@ -19,8 +20,17 @@ use crate::registry::Registry;
 async fn main() -> Result<()> {
     setup_tracing()?;
 
+    let mut args = std::env::args();
+    let _ = args.next();
+    let subcommand = args.next();
+
     let config = Config::from_env()?;
     let registry = Registry::load(&config.providers_path)?;
+
+    if matches!(subcommand.as_deref(), Some("doctor")) {
+        doctor::run(config.clone(), registry.clone()).await?;
+        return Ok(());
+    }
 
     tracing::info!(
         listen_addr = %config.listen_addr,
@@ -28,7 +38,7 @@ async fn main() -> Result<()> {
         "starting ORLB"
     );
 
-    let metrics = Metrics::new(registry.clone())?;
+    let metrics = Metrics::new(registry.clone(), &config)?;
     let client = build_http_client(config.request_timeout)?;
 
     let health_registry = registry.clone();

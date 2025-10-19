@@ -166,6 +166,10 @@
             <dd class="font-medium"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
+            <dt class="text-slate-400">Slot Lag</dt>
+            <dd class="font-medium"></dd>
+          </div>
+          <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Last Seen</dt>
             <dd class="font-medium"></dd>
           </div>
@@ -248,20 +252,46 @@
         return `${hours}h ago`;
       }
 
+      function relativeTimeUntil(ms) {
+        if (!ms) return "";
+        const delta = ms - Date.now();
+        if (delta <= 0) return "ready";
+        const seconds = Math.floor(delta / 1000);
+        if (seconds < 60) return `${seconds}s`;
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes}m`;
+        const hours = Math.floor(minutes / 60);
+        return `${hours}h`;
+      }
+
+      function formatSlotLag(lag) {
+        if (lag == null) return "--";
+        if (lag === 0) return "In sync";
+        if (lag === 1) return "1 slot";
+        return `${lag} slots`;
+      }
+
       function updateStats(snapshot) {
         const providers = snapshot.providers;
         const healthy = providers.filter((p) => p.healthy);
+        const standby = providers.filter((p) => !p.healthy && !p.quarantined);
+        const quarantined = providers.filter((p) => p.quarantined);
         providerCountEl.textContent = providers.length.toString();
-        healthyCountEl.textContent = `${healthy.length} healthy · ${providers.length - healthy.length} degraded`;
+        healthyCountEl.textContent = `${healthy.length} active, ${standby.length} standby, ${quarantined.length} quarantined`;
 
         const measured = providers.filter((p) => Number.isFinite(p.latency ?? p.latency_ema));
         const avgLatency =
           measured.reduce((sum, p) => sum + (p.latency ?? p.latency_ema ?? 0), 0) /
           (measured.length || 1);
         avgLatencyEl.textContent = measured.length ? `${avgLatency.toFixed(1)} ms` : "n/a";
-        latencyDetailEl.textContent = measured.length
-          ? `Across ${measured.length} providers reporting`
-          : "Waiting for probe data";
+        const bestSlot =
+          typeof snapshot.best_slot === "number" && snapshot.best_slot > 0 ? snapshot.best_slot : null;
+        if (measured.length) {
+          const slotText = bestSlot != null ? `latest slot ${bestSlot}` : "awaiting slot data";
+          latencyDetailEl.textContent = `Across ${measured.length} providers reporting; ${slotText}`;
+        } else {
+          latencyDetailEl.textContent = "Waiting for probe data";
+        }
 
         lastUpdatedEl.textContent = formatTimestamp(snapshot.updated_at);
         updatedAgoEl.textContent = relativeTimeFrom(snapshot.updated_at);
@@ -280,9 +310,12 @@
           return Number.isFinite(metricValue) ? metricValue : 0;
         });
 
-        const backgroundColors = providers.map((p) =>
-          p.healthy ? "rgba(99, 102, 241, 0.8)" : "rgba(249, 115, 22, 0.6)"
-        );
+        const backgroundColors = providers.map((p) => {
+          if (p.quarantined) {
+            return "rgba(248, 113, 113, 0.75)";
+          }
+          return p.healthy ? "rgba(99, 102, 241, 0.8)" : "rgba(249, 115, 22, 0.6)";
+        });
 
         const datasetLabel =
           metricKey === "score"
@@ -354,12 +387,21 @@
           const [nameEl, subtitleEl] = card.querySelectorAll("h3, p");
           nameEl.textContent = provider.name;
 
-          const relativeScore =
-            provider.score <= 120
-              ? "Preferred route"
-              : provider.score <= 200
-              ? "Balanced candidate"
-              : "Warm standby";
+          const slotsBehind = provider.slots_behind ?? null;
+          let relativeScore;
+          if (provider.quarantined) {
+            relativeScore = "Quarantined (cooldown)";
+          } else if (slotsBehind != null && slotsBehind >= 64) {
+            relativeScore = "Stale commitment";
+          } else if (slotsBehind != null && slotsBehind >= 16) {
+            relativeScore = "Watch commitment";
+          } else if (provider.score <= 120) {
+            relativeScore = "Preferred route";
+          } else if (provider.score <= 200) {
+            relativeScore = "Balanced candidate";
+          } else {
+            relativeScore = "Warm standby";
+          }
           subtitleEl.textContent = relativeScore;
 
           const statusBadge = card.querySelector("span.flex.items-center");
@@ -368,7 +410,11 @@
 
           statusBadge.classList.add("px-3", "py-1", "rounded-full", "transition-colors", "duration-300");
 
-          if (provider.healthy) {
+          if (provider.quarantined) {
+            badgeLabel.textContent = "Quarantined";
+            statusBadge.classList.add("bg-red-500/20", "text-red-300");
+            badgeDot.classList.add("bg-red-400");
+          } else if (provider.healthy) {
             badgeLabel.textContent = "Healthy";
             statusBadge.classList.add("bg-success/15", "text-success");
             badgeDot.classList.add("bg-success");
@@ -384,11 +430,19 @@
           details[2].textContent = `${provider.success} / ${provider.errors}`;
           details[3].textContent = formatScore(provider.score);
           details[4].textContent = provider.last_slot ?? "--";
-          details[5].textContent = relativeTimeFrom(provider.last_updated_ms);
+          details[5].textContent = formatSlotLag(slotsBehind);
+          details[6].textContent = relativeTimeFrom(provider.last_updated_ms);
 
           const footerSpans = card.querySelectorAll(".mt-6 span");
           footerSpans[0].textContent = `Weight ${provider.weight}`;
-          footerSpans[1].textContent = provider.healthy ? "ACTIVE" : "STANDBY";
+          if (provider.quarantined) {
+            const releaseWindow = relativeTimeUntil(provider.quarantined_until_ms);
+            footerSpans[1].textContent = releaseWindow
+              ? `QUARANTINED (release in ${releaseWindow})`
+              : "QUARANTINED";
+          } else {
+            footerSpans[1].textContent = provider.healthy ? "ACTIVE" : "STANDBY";
+          }
 
           providerCardsContainer.appendChild(card);
         });

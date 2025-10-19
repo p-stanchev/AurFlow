@@ -3,12 +3,15 @@
 ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across multiple upstream RPC providers. It continuously probes each provider, scores them on latency and error rate, retries idempotent calls once, and exposes live Prometheus metrics plus a web dashboard. The goal of this MVP is to prove dependable routing with public RPCs in a single-container deploy.
 
 ## Core Capabilities
-- **Smart routing** – weighted round-robin informed by latency EMA and failure streaks.
-- **Read-only safety** – mutating RPC methods like `sendTransaction` are blocked.
-- **Automatic retries** – read-only calls try a second provider on timeouts/429/5xx.
-- **Health probes** – background `getSlot` checks every 5s update provider status.
-- **Observability** – `/metrics` (Prometheus text) and `/metrics.json` plus `/dashboard` (Chart.js) showing live scores.
-- **Simple ops** – single binary with embedded dashboard, configurable via env vars, ships with Dockerfile and CI.
+- **Smart routing** - weighted round-robin informed by latency EMA and failure streaks.
+- **Read-only safety** - mutating RPC methods like `sendTransaction` are blocked.
+- **Automatic retries** - read-only calls try a second provider on timeouts/429/5xx.
+- **Health probes** - background `getSlot` checks every 5s update provider status.
+- **Quarantine & backoff** - providers with sustained failures are sidelined with exponential cooldown until probes succeed.
+- **Freshness scoring** - slot-aware penalties keep traffic on the highest-commitment providers.
+- **Observability** - `/metrics` (Prometheus text) and `/metrics.json` plus `/dashboard` (Chart.js) showing live scores.
+- **Doctor CLI** - `orlb doctor` lints the registry, validates headers, and probes each upstream before you deploy.
+- **Simple ops** - single binary with embedded dashboard, configurable via env vars, ships with Dockerfile and CI.
 
 ## Project Layout
 ```
@@ -57,16 +60,24 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_REQUEST_TIMEOUT_SECS` | `10` | Upstream request timeout |
 | `ORLB_RETRY_READ_REQUESTS` | `true` | Retry read-only calls once on failure |
 | `ORLB_DASHBOARD_DIR` | unset | Optional override directory for dashboard HTML |
+| `ORLB_SLOT_LAG_PENALTY_MS` | `5` | Weighted-score penalty (ms) applied per slot behind the freshest provider |
+| `ORLB_SLOT_LAG_ALERT_SLOTS` | `50` | `orlb doctor` warns when a provider lags this many slots |
 
 `providers.json` format:
 ```json
 [
   {"name": "Solana Foundation", "url": "https://api.mainnet-beta.solana.com", "weight": 1},
-  {"name": "Ankr", "url": "https://rpc.ankr.com/solana", "weight": 1},
-  {"name": "Helius", "url": "https://rpc.helius.xyz/?api-key=demo", "weight": 1}
+  {"name": "PublicNode", "url": "https://solana-rpc.publicnode.com", "weight": 1},
+  {"name": "Alchemy (demo)", "url": "https://solana-mainnet.g.alchemy.com/v2/demo", "weight": 1},
+  {"name": "QuikNode (docs demo)", "url": "https://docs-demo.solana-mainnet.quiknode.pro", "weight": 1},
+  {"name": "SolanaTracker", "url": "https://rpc.solanatracker.io/public", "weight": 1}
 ]
 ```
-Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`).
+Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`). Tune `weight` to bias traffic toward trusted paid tiers while still keeping resilient public RPC coverage.
+
+### Diagnostics
+Run `cargo run -- doctor` (or the compiled binary with `orlb doctor`) to lint the provider registry and perform live reachability probes. The command flags duplicate names/URLs, invalid headers, zero weights, stale commitment (providers lagging more than `ORLB_SLOT_LAG_ALERT_SLOTS` slots), and transport/HTTP failures. A non-zero exit status indicates issues that should be fixed before deploying.
+
 
 ### HTTP Endpoints
 - `POST /rpc` – JSON-RPC forwarding (read-only enforced, retries once on retryable failures).
@@ -124,6 +135,11 @@ Set secrets for any private provider headers or API keys. The service is statele
 - Subscription/WebSocket fan-out.
 - API key rate limiting and auth.
 - Edge deployments across regions, optional caching (e.g., `getLatestBlockhash`).
+- Adaptive parallelism/hedging to shave p99 latency when a provider stalls.
+- Provider tagging/policies to express traffic weights by tier (paid vs public pools).
+- SLO-aware alerting that turns Prometheus metrics into burn-rate signals.
+- Optional secret-manager (Vault/GCP/AWS) integration for provider API keys.
 
 ## License
 Apache 2.0 (or adapt as needed). Feel free to fork and extend for grant demos or production load-balancing.
+

@@ -503,16 +503,19 @@ mod tests {
             request_timeout: Duration::from_secs(5),
             retry_read_requests: true,
             dashboard_assets_dir: None,
+            slot_lag_penalty_ms: 5.0,
+            slot_lag_alert_slots: 50,
         }
     }
 
     async fn build_state(providers: Vec<Provider>) -> Arc<AppState> {
         let registry = Registry::from_providers(providers).unwrap();
-        let metrics = Metrics::new(registry).unwrap();
+        let config = test_config();
+        let metrics = Metrics::new(registry, &config).unwrap();
         let client = build_http_client(Duration::from_secs(5)).unwrap();
 
         Arc::new(AppState {
-            config: test_config(),
+            config,
             metrics,
             client,
         })

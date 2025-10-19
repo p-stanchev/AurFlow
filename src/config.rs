@@ -14,6 +14,8 @@ pub struct Config {
     pub request_timeout: Duration,
     pub retry_read_requests: bool,
     pub dashboard_assets_dir: Option<PathBuf>,
+    pub slot_lag_penalty_ms: f64,
+    pub slot_lag_alert_slots: u64,
 }
 
 impl Config {
@@ -35,6 +37,13 @@ impl Config {
         let dashboard_assets_dir = env::var("ORLB_DASHBOARD_DIR")
             .ok()
             .map(|value| Path::new(&value).to_path_buf());
+        let slot_lag_penalty_ms = clamp_f64(
+            parse_env("ORLB_SLOT_LAG_PENALTY_MS", "5", parse_f64)?,
+            0.0,
+            5000.0,
+        );
+        let slot_lag_alert_slots =
+            parse_env("ORLB_SLOT_LAG_ALERT_SLOTS", "50", parse_u64)?.min(10_000);
 
         Ok(Self {
             listen_addr,
@@ -43,11 +52,23 @@ impl Config {
             request_timeout,
             retry_read_requests,
             dashboard_assets_dir,
+            slot_lag_penalty_ms,
+            slot_lag_alert_slots,
         })
     }
 }
 
 fn clamp_duration(value: Duration, min: Duration, max: Duration) -> Duration {
+    if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    }
+}
+
+fn clamp_f64(value: f64, min: f64, max: f64) -> f64 {
     if value < min {
         min
     } else if value > max {
@@ -72,6 +93,18 @@ fn parse_duration_secs(input: &str) -> Result<Duration> {
         .parse()
         .with_context(|| format!("invalid duration seconds `{input}`"))?;
     Ok(Duration::from_secs(secs))
+}
+
+fn parse_f64(input: &str) -> Result<f64> {
+    input
+        .parse::<f64>()
+        .with_context(|| format!("invalid floating point value `{input}`"))
+}
+
+fn parse_u64(input: &str) -> Result<u64> {
+    input
+        .parse::<u64>()
+        .with_context(|| format!("invalid integer value `{input}`"))
 }
 
 fn parse_bool(input: &str) -> Result<bool> {
