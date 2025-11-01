@@ -13,6 +13,7 @@ use prometheus::{
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock};
 
+use crate::commitment::Commitment;
 use crate::config::Config;
 use crate::registry::{Provider, Registry};
 
@@ -28,6 +29,37 @@ const SLO_WINDOWS: &[(&str, Duration)] = &[
     ("5m", Duration::from_secs(300)),
     ("30m", Duration::from_secs(1800)),
 ];
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct CommitmentSlots {
+    processed: Option<u64>,
+    confirmed: Option<u64>,
+    finalized: Option<u64>,
+}
+
+impl CommitmentSlots {
+    pub(crate) fn set(&mut self, commitment: Commitment, slot: Option<u64>) {
+        match commitment {
+            Commitment::Processed => self.processed = slot,
+            Commitment::Confirmed => self.confirmed = slot,
+            Commitment::Finalized => self.finalized = slot,
+        }
+    }
+
+    pub(crate) fn get(&self, commitment: Commitment) -> Option<u64> {
+        match commitment {
+            Commitment::Processed => self.processed,
+            Commitment::Confirmed => self.confirmed,
+            Commitment::Finalized => self.finalized,
+        }
+    }
+
+    pub(crate) fn from_slot(commitment: Commitment, slot: Option<u64>) -> Self {
+        let mut slots = Self::default();
+        slots.set(commitment, slot);
+        slots
+    }
+}
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -66,7 +98,7 @@ struct ProviderState {
     probe_error_count: u64,
     consecutive_failures: u32,
     healthy: bool,
-    last_slot: Option<u64>,
+    slots: CommitmentSlots,
     last_updated: SystemTime,
     quarantined_until: Option<SystemTime>,
 }
@@ -82,7 +114,7 @@ impl ProviderState {
             probe_error_count: 0,
             consecutive_failures: 0,
             healthy: true,
-            last_slot: None,
+            slots: CommitmentSlots::default(),
             last_updated: SystemTime::UNIX_EPOCH,
             quarantined_until: None,
         }
@@ -102,12 +134,20 @@ pub struct DashboardProvider {
     pub consecutive_failures: u32,
     pub last_slot: Option<u64>,
     pub slots_behind: Option<u64>,
+    pub commitments: Vec<DashboardCommitmentSlot>,
     pub last_updated_ms: u64,
     pub weight: u16,
     pub score: f64,
     pub raw_score: f64,
     pub quarantined: bool,
     pub quarantined_until_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DashboardCommitmentSlot {
+    pub commitment: String,
+    pub slot: Option<u64>,
+    pub slots_behind: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -147,7 +187,7 @@ impl Metrics {
         )?;
         let provider_slot = GaugeVec::new(
             Opts::new("provider_slot", "Last observed slot height"),
-            &["provider"],
+            &["provider", "commitment"],
         )?;
         let provider_errors = IntCounterVec::new(
             Opts::new("provider_errors_total", "Total provider errors"),
@@ -390,17 +430,19 @@ impl Metrics {
         &self,
         provider: &str,
         latency: Duration,
-        slot: Option<u64>,
+        slots: CommitmentSlots,
     ) {
         let latency_ms = latency.as_secs_f64() * 1000.0;
         self.provider_latency
             .with_label_values(&[provider])
             .set(latency_ms);
 
-        if let Some(slot) = slot {
-            self.provider_slot
-                .with_label_values(&[provider])
-                .set(slot as f64);
+        for commitment in Commitment::ALL {
+            if let Some(slot) = slots.get(commitment) {
+                self.provider_slot
+                    .with_label_values(&[provider, commitment.as_str()])
+                    .set(slot as f64);
+            }
         }
 
         {
@@ -418,8 +460,10 @@ impl Metrics {
                 EMA_ALPHA,
                 FALLBACK_LATENCY_MS,
             );
-            if slot.is_some() {
-                state.last_slot = slot;
+            for commitment in Commitment::ALL {
+                if let Some(slot) = slots.get(commitment) {
+                    state.slots.set(commitment, Some(slot));
+                }
             }
             state.quarantined_until = None;
             state.last_updated = SystemTime::now();
@@ -460,7 +504,7 @@ impl Metrics {
         }
     }
 
-    pub async fn provider_ranked_list(&self) -> Vec<(Provider, f64, bool)> {
+    pub async fn provider_ranked_list(&self, commitment: Commitment) -> Vec<(Provider, f64, bool)> {
         let state = self.state.read().await;
         let providers = self.registry.providers();
         if providers.is_empty() {
@@ -471,7 +515,7 @@ impl Metrics {
 
         let best_slot = state
             .values()
-            .filter_map(|s| s.last_slot)
+            .filter_map(|s| s.slots.get(commitment))
             .max()
             .unwrap_or(0);
         let now = SystemTime::now();
@@ -482,11 +526,13 @@ impl Metrics {
                 let snapshot = state.get(&provider.name);
                 let (healthy, raw_score, quarantined_until) = match snapshot {
                     Some(s) => {
-                        let slots_behind = s.last_slot.map(|slot| best_slot.saturating_sub(slot));
+                        let slot_opt = s.slots.get(commitment);
+                        let slots_behind = slot_opt.map(|slot| best_slot.saturating_sub(slot));
                         let slot_penalty =
                             compute_slot_penalty(slots_behind, self.slot_lag_penalty_ms);
+                        let healthy_flag = s.healthy && (best_slot == 0 || slot_opt.is_some());
                         (
-                            s.healthy,
+                            healthy_flag,
                             compute_score(
                                 s.latency_ema_ms,
                                 s.consecutive_failures,
@@ -497,7 +543,7 @@ impl Metrics {
                         )
                     }
                     None => (
-                        true,
+                        best_slot == 0,
                         compute_score(
                             FALLBACK_LATENCY_MS,
                             0,
@@ -541,11 +587,22 @@ impl Metrics {
     pub async fn dashboard_snapshot(&self) -> DashboardSnapshot {
         let state = self.state.read().await;
         let now = SystemTime::now();
-        let best_slot_value = state
-            .values()
-            .filter_map(|s| s.last_slot)
-            .max()
-            .unwrap_or(0);
+
+        let best_slots: HashMap<Commitment, u64> = Commitment::ALL
+            .iter()
+            .copied()
+            .map(|commitment| {
+                let best = state
+                    .values()
+                    .filter_map(|s| s.slots.get(commitment))
+                    .max()
+                    .unwrap_or(0);
+                (commitment, best)
+            })
+            .collect();
+
+        let best_finalized = *best_slots.get(&Commitment::Finalized).unwrap_or(&0);
+
         let mut providers: Vec<_> = self
             .registry
             .providers()
@@ -561,7 +618,7 @@ impl Metrics {
                     probe_errors,
                     healthy,
                     failures,
-                    slot,
+                    slots,
                     updated,
                     quarantined_until,
                 ) = snapshot
@@ -575,7 +632,7 @@ impl Metrics {
                             s.probe_error_count,
                             s.healthy,
                             s.consecutive_failures,
-                            s.last_slot,
+                            s.slots,
                             s.last_updated,
                             s.quarantined_until,
                         )
@@ -589,17 +646,45 @@ impl Metrics {
                         0,
                         true,
                         0,
-                        None,
+                        CommitmentSlots::default(),
                         SystemTime::UNIX_EPOCH,
                         None,
                     ));
-                let slots_behind = slot.map(|value| best_slot_value.saturating_sub(value));
+
+                let finalized_slot = slots.get(Commitment::Finalized);
+                let slots_behind = finalized_slot.and_then(|value| {
+                    if best_finalized == 0 {
+                        None
+                    } else {
+                        Some(best_finalized.saturating_sub(value))
+                    }
+                });
                 let slot_penalty = compute_slot_penalty(slots_behind, self.slot_lag_penalty_ms);
                 let total_errors = request_errors.saturating_add(probe_errors);
                 let raw_score = compute_score(ema, failures, total_errors, slot_penalty);
                 let weighted_score = raw_score / provider.weight.max(1) as f64;
                 let quarantined = matches!(quarantined_until, Some(deadline) if deadline > now);
                 let healthy_display = healthy && !quarantined;
+
+                let commitments: Vec<DashboardCommitmentSlot> = Commitment::ALL
+                    .iter()
+                    .map(|commitment| {
+                        let slot = slots.get(*commitment);
+                        let best_for = *best_slots.get(commitment).unwrap_or(&0);
+                        let slots_behind = slot.and_then(|value| {
+                            if best_for == 0 {
+                                None
+                            } else {
+                                Some(best_for.saturating_sub(value))
+                            }
+                        });
+                        DashboardCommitmentSlot {
+                            commitment: commitment.as_str().to_string(),
+                            slot,
+                            slots_behind,
+                        }
+                    })
+                    .collect();
 
                 DashboardProvider {
                     name: provider.name.clone(),
@@ -611,8 +696,9 @@ impl Metrics {
                     probe_errors,
                     healthy: healthy_display,
                     consecutive_failures: failures,
-                    last_slot: slot,
+                    last_slot: finalized_slot,
                     slots_behind,
+                    commitments,
                     last_updated_ms: system_time_to_millis(updated),
                     weight: provider.weight,
                     score: weighted_score,
@@ -632,8 +718,8 @@ impl Metrics {
         DashboardSnapshot {
             providers,
             updated_at: system_time_to_millis(now),
-            best_slot: if best_slot_value > 0 {
-                Some(best_slot_value)
+            best_slot: if best_finalized > 0 {
+                Some(best_finalized)
             } else {
                 None
             },
@@ -936,13 +1022,21 @@ mod tests {
         let metrics = Metrics::new(registry, &config).unwrap();
 
         metrics
-            .record_health_success("Fresh", Duration::from_millis(100), Some(2_000))
+            .record_health_success(
+                "Fresh",
+                Duration::from_millis(100),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(2_000)),
+            )
             .await;
         metrics
-            .record_health_success("Stale", Duration::from_millis(80), Some(1_900))
+            .record_health_success(
+                "Stale",
+                Duration::from_millis(80),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(1_900)),
+            )
             .await;
 
-        let ranked = metrics.provider_ranked_list().await;
+        let ranked = metrics.provider_ranked_list(Commitment::Finalized).await;
         assert_eq!(ranked.first().unwrap().0.name, "Fresh");
         assert_eq!(ranked.last().unwrap().0.name, "Stale");
 
@@ -976,7 +1070,11 @@ mod tests {
             .record_request_failure("Solo", "getSlot", "status_500")
             .await;
         metrics
-            .record_health_success("Solo", Duration::from_millis(30), Some(1_234))
+            .record_health_success(
+                "Solo",
+                Duration::from_millis(30),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(1_234)),
+            )
             .await;
         metrics.record_health_failure("Solo", "timeout").await;
 
@@ -991,5 +1089,6 @@ mod tests {
         assert_eq!(card.errors, 1);
         assert_eq!(card.probe_success, 1);
         assert_eq!(card.probe_errors, 1);
+        assert_eq!(card.commitments.len(), Commitment::ALL.len());
     }
 }

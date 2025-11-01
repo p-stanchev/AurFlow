@@ -17,6 +17,7 @@ use tokio::task::JoinSet;
 use tokio::time::sleep;
 use uuid::Uuid;
 
+use crate::commitment::Commitment;
 use crate::config::Config;
 use crate::dashboard;
 use crate::errors::OrlbError;
@@ -161,8 +162,13 @@ async fn handle_rpc(
         ));
     }
 
+    let required_commitment = metadata.commitment();
+
     let method_label = metadata.method_label();
-    let ranked = state.metrics.provider_ranked_list().await;
+    let ranked = state
+        .metrics
+        .provider_ranked_list(required_commitment)
+        .await;
     let mut healthy_candidates = Vec::new();
     let mut all_candidates = Vec::new();
     for (provider, _score, healthy) in ranked {
@@ -574,6 +580,7 @@ struct RequestMetadata {
     retryable: bool,
     id: Option<Value>,
     is_batch: bool,
+    required_commitment: Commitment,
 }
 
 impl RequestMetadata {
@@ -587,12 +594,18 @@ impl RequestMetadata {
                 let id = map.get("id").cloned();
                 let method = forward::normalize_method_name(method).to_string();
                 let contains_mutating_method = is_mutating_method(&method);
+                let mut required_commitment = Commitment::Finalized;
+                if let Some(params) = map.get("params") {
+                    required_commitment = required_commitment
+                        .merge_requirement(extract_commitment_from_params(params));
+                }
                 Ok(Self {
                     method_names: vec![method.clone()],
                     contains_mutating_method,
                     retryable: !contains_mutating_method,
                     id,
                     is_batch: false,
+                    required_commitment,
                 })
             }
             Value::Array(items) => {
@@ -603,6 +616,7 @@ impl RequestMetadata {
                 }
                 let mut methods = Vec::with_capacity(items.len());
                 let mut mutating = false;
+                let mut required_commitment = Commitment::Finalized;
                 for item in items {
                     let method = item.get("method").and_then(Value::as_str).ok_or_else(|| {
                         OrlbError::InvalidPayload("batch entry missing method field".into())
@@ -612,6 +626,10 @@ impl RequestMetadata {
                         mutating = true;
                     }
                     methods.push(method);
+                    if let Some(params) = item.get("params") {
+                        required_commitment = required_commitment
+                            .merge_requirement(extract_commitment_from_params(params));
+                    }
                 }
                 Ok(Self {
                     method_names: methods,
@@ -619,6 +637,7 @@ impl RequestMetadata {
                     retryable: !mutating,
                     id: None,
                     is_batch: true,
+                    required_commitment,
                 })
             }
             _ => Err(OrlbError::InvalidPayload(
@@ -636,6 +655,25 @@ impl RequestMetadata {
                 .cloned()
                 .unwrap_or_else(|| "unknown".to_string())
         }
+    }
+
+    fn commitment(&self) -> Commitment {
+        self.required_commitment
+    }
+}
+
+fn extract_commitment_from_params(value: &Value) -> Option<Commitment> {
+    match value {
+        Value::Array(items) => items.iter().find_map(extract_commitment_from_params),
+        Value::Object(map) => {
+            if let Some(Value::String(level)) = map.get("commitment") {
+                let normalized = level.to_ascii_lowercase();
+                Commitment::from_str(&normalized)
+            } else {
+                map.values().find_map(extract_commitment_from_params)
+            }
+        }
+        _ => None,
     }
 }
 

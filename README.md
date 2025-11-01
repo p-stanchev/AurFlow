@@ -9,6 +9,7 @@ ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across 
 - **Health probes** - background `getSlot` checks every 5s update provider status.
 - **Quarantine & backoff** - providers with sustained failures are sidelined with exponential cooldown until probes succeed.
 - **Freshness scoring** - slot-aware penalties keep traffic on the highest-commitment providers.
+- **Commitment-aware routing** - inspects JSON-RPC commitment hints and prefers providers whose slot height satisfies processed/confirmed/finalized requirements.
 - **Adaptive hedging** - optional parallel requests race a backup provider when the primary stalls.
 - **Observability** - `/metrics` (Prometheus text) and `/metrics.json` plus `/dashboard` (Chart.js) showing live scores.
 - **Doctor CLI** - `orlb doctor` lints the registry, validates headers, and probes each upstream before you deploy.
@@ -102,6 +103,7 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 - `orlb_hedges_total{reason}`   hedged request launches grouped by trigger (`timer`, `status`, etc.).
 - `orlb_provider_latency_ms{provider}`   latest latency measurement.
 - `orlb_provider_health{provider}`   `1` healthy, `0` degraded.
+- `orlb_provider_slot{provider,commitment}`   most recent slot observed for processed/confirmed/finalized commitments.
 - `orlb_slo_availability_ratio{window}`   rolling availability for predefined SLO windows (`5m`, `30m`).
 - `orlb_slo_error_budget_burn{window}`   error-budget burn rate normalised against `ORLB_SLO_TARGET`.
 - `orlb_slo_window_requests{window}` / `orlb_slo_window_errors{window}`   sample sizes that back the SLO gauges.
@@ -110,6 +112,7 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 - **Tracing** - enable OpenTelemetry spans by setting `ORLB_OTEL_EXPORTER` to `stdout` (local debugging) or `otlp_http` plus `ORLB_OTEL_ENDPOINT` for collectors such as the upstream OTEL Collector. `ORLB_OTEL_SERVICE_NAME` customises the emitted `service.name` resource.
 - **Service-level objectives** - the SLO gauges exposed at `/metrics` track 5-minute and 30-minute availability windows and their burn rates against `ORLB_SLO_TARGET` (default 99.5%). These gauges back intuitive alert rules and time series panels.
 - **Per-provider SLOs** - `orlb_provider_slo_availability_ratio{provider,window}` and `orlb_provider_slo_error_ratio{provider,window}` expose rolling availability and error shares for each upstream, feeding the Grafana panels.
+- **Commitment tracking** - provider snapshots and metrics highlight slot lag per processed/confirmed/finalized commitment so you can spot stale endpoints quickly.
 - **Dashboards & alerts** - import `ops/grafana/dashboards/orlb-dashboard.json` into Grafana and point it at your Prometheus datasource to get request rate, SLO, and provider latency visualisations. `ops/alerts/orlb-alerts.yaml` provides matching Prometheus alert rules for burn-rate breaches and chronically unhealthy providers.
 - **Quick checks** - `/metrics` now includes a `Refresh: 5` header so you can leave it open in a browser and watch gauges update in real time.
 

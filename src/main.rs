@@ -1,3 +1,4 @@
+mod commitment;
 mod config;
 mod dashboard;
 mod doctor;

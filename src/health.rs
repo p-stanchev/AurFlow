@@ -3,18 +3,19 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use bytes::Bytes;
 use reqwest::Client;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::task::JoinSet;
 use tokio::time::{interval, MissedTickBehavior};
 
+use crate::commitment::Commitment;
 use crate::forward;
-use crate::metrics::Metrics;
+use crate::metrics::{CommitmentSlots, Metrics};
 use crate::registry::{Provider, Registry};
 
 const HEALTH_METHOD: &str = "getSlot";
 
 pub async fn run(registry: Registry, metrics: Metrics, client: Client, probe_interval: Duration) {
-    let payload = serde_json::json!({
+    let payload = json!({
         "jsonrpc": "2.0",
         "id": "orlb-health",
         "method": HEALTH_METHOD,
@@ -107,13 +108,26 @@ async fn probe_provider(
         }
     };
 
+    let mut slots = CommitmentSlots::from_slot(Commitment::Finalized, slot);
+    for commitment in [Commitment::Confirmed, Commitment::Processed] {
+        if let Some(extra_slot) = fetch_commitment_slot(&client, &provider, commitment).await {
+            slots.set(commitment, Some(extra_slot));
+        }
+    }
+
     metrics
-        .record_health_success(&provider.name, elapsed, slot)
+        .record_health_success(&provider.name, elapsed, slots)
         .await;
+
+    let finalized_slot = slots.get(Commitment::Finalized);
+    let confirmed_slot = slots.get(Commitment::Confirmed);
+    let processed_slot = slots.get(Commitment::Processed);
     tracing::trace!(
         provider = provider.name,
         latency_ms = elapsed.as_secs_f64() * 1000.0,
-        slot,
+        finalized_slot,
+        confirmed_slot,
+        processed_slot,
         "health probe success"
     );
 
@@ -127,6 +141,71 @@ async fn probe_provider(
     }
 
     Ok(())
+}
+
+async fn fetch_commitment_slot(
+    client: &Client,
+    provider: &Provider,
+    commitment: Commitment,
+) -> Option<u64> {
+    let payload = json!({
+        "jsonrpc": "2.0",
+        "id": format!("orlb-health-{}", commitment.as_str()),
+        "method": HEALTH_METHOD,
+        "params": [
+            {
+                "commitment": commitment.as_str()
+            }
+        ]
+    });
+    let bytes = match serde_json::to_vec(&payload) {
+        Ok(vec) => vec,
+        Err(err) => {
+            tracing::debug!(
+                error = ?err,
+                provider = provider.name,
+                commitment = %commitment,
+                "failed to serialize commitment health payload"
+            );
+            return None;
+        }
+    };
+
+    let response = match forward::send_request(client, provider, &bytes).await {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::debug!(
+                error = ?err,
+                provider = provider.name,
+                commitment = %commitment,
+                "commitment probe transport error"
+            );
+            return None;
+        }
+    };
+
+    if !response.status().is_success() {
+        tracing::debug!(
+            status = %response.status(),
+            provider = provider.name,
+            commitment = %commitment,
+            "commitment probe non-success status"
+        );
+        return None;
+    }
+
+    match response.json::<Value>().await {
+        Ok(value) => extract_slot(&value),
+        Err(err) => {
+            tracing::debug!(
+                error = ?err,
+                provider = provider.name,
+                commitment = %commitment,
+                "failed to decode commitment probe response"
+            );
+            None
+        }
+    }
 }
 
 fn extract_slot(value: &Value) -> Option<u64> {

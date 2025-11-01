@@ -73,6 +73,52 @@
       "fieldConfig": {
         "defaults": {
           "custom": {},
+          "displayName": "${__field.labels.provider} (${__field.labels.commitment})",
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 22
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "orlb_provider_slot",
+          "legendFormat": "{{provider}} ({{commitment}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider slot height by commitment",
+      "transformations": [],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
           "displayName": "${__field.labels.provider} (${__field.labels.window})",
           "max": 1,
           "min": 0,
