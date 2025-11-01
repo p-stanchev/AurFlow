@@ -17,17 +17,17 @@ ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across 
 ## Project Layout
 ```
 src/
-  main.rs            GÇô bootstrap (config, tracing, background tasks)
-  config.rs          GÇô env parsing with defaults
-  registry.rs        GÇô provider registry loader (`providers.json`)
-  metrics.rs         GÇô Prometheus collectors + dashboard snapshot logic
-  forward.rs         GÇô reqwest client builder and JSON-RPC forwarding
-  health.rs          GÇô async probe loop updating provider health
-  router.rs          GÇô Hyper HTTP server, routing, retry logic, tests
-  dashboard.rs       GÇô serves embedded Chart.js dashboard
-static/dashboard.html GÇô HTML/JS UI (pulls `/metrics.json` every 5s)
-providers.json        GÇô sample provider pool
-Dockerfile            GÇô multi-stage build producing minimal image
+  main.rs              bootstrap (config, tracing, background tasks)
+  config.rs            env parsing with defaults
+  registry.rs          provider registry loader (`providers.json`)
+  metrics.rs           Prometheus collectors + dashboard snapshot logic
+  forward.rs           reqwest client builder and JSON-RPC forwarding
+  health.rs            async probe loop updating provider health
+  router.rs            Hyper HTTP server, routing, retry logic, tests
+  dashboard.rs         serves embedded Chart.js dashboard
+static/dashboard.html   HTML/JS UI (pulls `/metrics.json` every 5s)
+providers.json          sample provider pool
+Dockerfile              multi-stage build producing minimal image
 ```
 
 ## Getting Started
@@ -86,18 +86,18 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 
 
 ### HTTP Endpoints
-- `POST /rpc` GÇô JSON-RPC forwarding (read-only enforced, retries once on retryable failures).
-- `GET /metrics` GÇô Prometheus text format metrics (`orlb_requests_total`, `orlb_provider_latency_ms`, etc.).
-- `GET /metrics.json` GÇô JSON snapshot powering the dashboard.
-- `GET /dashboard` GÇô live Chart.js UI summarising provider health.
+- `POST /rpc`   JSON-RPC forwarding (read-only enforced, retries once on retryable failures).
+- `GET /metrics`   Prometheus text format metrics (`orlb_requests_total`, `orlb_provider_latency_ms`, etc.).
+- `GET /metrics.json`   JSON snapshot powering the dashboard.
+- `GET /dashboard`   live Chart.js UI summarising provider health.
 
 ### Metrics Highlights
-- `orlb_requests_total{provider,method,status}` – counts per upstream and outcome.
-- `orlb_request_failures_total{provider,reason}` – upstream failures grouped by reason.
-- `orlb_retries_total{reason}` – retry invocations (transport/timeouts/status codes).
-- `orlb_hedges_total{reason}` – hedged request launches grouped by trigger (`timer`, `status`, etc.).
-- `orlb_provider_latency_ms{provider}` – latest latency measurement.
-- `orlb_provider_health{provider}` – `1` healthy, `0` degraded.
+- `orlb_requests_total{provider,method,status}` ï¿½ counts per upstream and outcome.
+- `orlb_request_failures_total{provider,reason}` ï¿½ upstream failures grouped by reason.
+- `orlb_retries_total{reason}` ï¿½ retry invocations (transport/timeouts/status codes).
+- `orlb_hedges_total{reason}` ï¿½ hedged request launches grouped by trigger (`timer`, `status`, etc.).
+- `orlb_provider_latency_ms{provider}` ï¿½ latest latency measurement.
+- `orlb_provider_health{provider}` ï¿½ `1` healthy, `0` degraded.
 ## Testing
 Unit-style tests live alongside the router and cover forwarding success, retry failover, and write-method rejection. Run the full suite with:
 ```bash
