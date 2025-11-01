@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{hash_map::DefaultHasher, HashSet};
 use std::convert::Infallible;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -100,6 +101,13 @@ async fn route(req: Request<Body>, state: Arc<AppState>) -> Response<Body> {
                 }
             }
         }
+        (&Method::GET, "/aurflow.png") => match dashboard::serve_logo(&state.config) {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::error!(error = ?err, "dashboard logo rendering failed");
+                internal_server_error()
+            }
+        },
         _ => not_found(),
     }
 }
@@ -177,13 +185,23 @@ async fn handle_rpc(
         }
         all_candidates.push(provider);
     }
-    let providers: Vec<Provider> = if healthy_candidates.is_empty() {
+    let mut providers: Vec<Provider> = if healthy_candidates.is_empty() {
         all_candidates
     } else {
         healthy_candidates
     };
     if providers.is_empty() {
         return Err((OrlbError::NoHealthyProviders, response_id));
+    }
+
+    if let Some(id_seed) = metadata
+        .id
+        .as_ref()
+        .and_then(|id| request_id_seed(id, providers.len()))
+    {
+        if id_seed > 0 {
+            providers.rotate_left(id_seed);
+        }
     }
 
     let max_attempts = if state.config.retry_read_requests && metadata.retryable {
@@ -697,6 +715,7 @@ mod tests {
 
     use crate::config::{Config, OtelConfig, OtelExporter};
     use crate::forward::build_http_client;
+    use crate::metrics::CommitmentSlots;
     use crate::registry::{Provider, Registry};
 
     fn test_config() -> Config {
@@ -743,6 +762,16 @@ mod tests {
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from(payload.to_string()))
             .unwrap()
+    }
+
+    fn find_request_id_with_seed(seed: usize, count: usize) -> Value {
+        for candidate in 0u64..10_000 {
+            let value = Value::from(candidate);
+            if request_id_seed(&value, count) == Some(seed) {
+                return value;
+            }
+        }
+        panic!("unable to find request id with seed {seed} for count {count}");
     }
 
     #[tokio::test]
@@ -802,12 +831,14 @@ mod tests {
             .mount(&primary)
             .await;
 
+        let request_id = find_request_id_with_seed(0, 2);
+
         let secondary = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(json!({"jsonrpc":"2.0","result":99,"id":1})),
+                    .set_body_json(json!({"jsonrpc":"2.0","result":99,"id": request_id.clone()})),
             )
             .expect(1)
             .mount(&secondary)
@@ -831,7 +862,8 @@ mod tests {
         ];
 
         let state = build_state(providers).await;
-        let payload = json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]});
+        let payload =
+            json!({"jsonrpc":"2.0","id": request_id,"method":"getSlot","params":[]});
         let request = make_request(payload);
 
         let response = handle_rpc(request, state.clone()).await.unwrap();
@@ -971,4 +1003,107 @@ mod tests {
             other => panic!("expected mutating method error, got {:?}", other),
         }
     }
+
+    #[tokio::test]
+    async fn different_ids_rotate_providers_with_skewed_slots() {
+        let first = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "first",
+                "id": 1
+            })))
+            .expect(1)
+            .mount(&first)
+            .await;
+
+        let second = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "second",
+                "id": 2
+            })))
+            .expect(1)
+            .mount(&second)
+            .await;
+
+        let providers = vec![
+            Provider {
+                name: "First".into(),
+                url: first.uri(),
+                weight: 1,
+                headers: None,
+                tags: Vec::new(),
+            },
+            Provider {
+                name: "Second".into(),
+                url: second.uri(),
+                weight: 1,
+                headers: None,
+                tags: Vec::new(),
+            },
+        ];
+
+        let state = build_state(providers).await;
+        state
+            .metrics
+            .record_health_success(
+                "First",
+                Duration::from_millis(100),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(418_000_000)),
+            )
+            .await;
+        state
+            .metrics
+            .record_health_success(
+                "Second",
+                Duration::from_millis(100),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(2_000_000)),
+            )
+            .await;
+
+        assert_ne!(
+            request_id_seed(&Value::from(1), 2),
+            request_id_seed(&Value::from(2), 2)
+        );
+
+        let resp_one = handle_rpc(
+            make_request(json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]})),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        let provider_one = resp_one
+            .headers()
+            .get("x-orlb-provider")
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+
+        let resp_two = handle_rpc(
+            make_request(json!({"jsonrpc":"2.0","id":2,"method":"getSlot","params":[]})),
+            state.clone(),
+        )
+        .await
+        .unwrap();
+        let provider_two = resp_two
+            .headers()
+            .get("x-orlb-provider")
+            .and_then(|value| value.to_str().ok())
+            .unwrap();
+
+        assert_ne!(provider_one, provider_two);
+    }
+}
+
+fn request_id_seed(id: &Value, count: usize) -> Option<usize> {
+    if count == 0 {
+        return None;
+    }
+    let serialized = serde_json::to_string(id).ok()?;
+    let mut hasher = DefaultHasher::new();
+    serialized.hash(&mut hasher);
+    Some((hasher.finish() as usize) % count)
 }

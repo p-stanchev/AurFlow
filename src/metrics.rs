@@ -28,7 +28,9 @@ const SLO_BUCKET_WIDTH: Duration = Duration::from_secs(10);
 const SLO_WINDOWS: &[(&str, Duration)] = &[
     ("5m", Duration::from_secs(300)),
     ("30m", Duration::from_secs(1800)),
+    ("2h", Duration::from_secs(7200)),
 ];
+const MULTI_CLUSTER_SPREAD_MULTIPLIER: u64 = 1000;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CommitmentSlots {
@@ -87,6 +89,7 @@ pub struct Metrics {
     slo_tracker: Arc<Mutex<SloTracker>>,
     provider_slo_trackers: Arc<Mutex<HashMap<String, SloTracker>>>,
     slo_target: f64,
+    slot_lag_alert_slots: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -306,6 +309,7 @@ impl Metrics {
             slo_tracker,
             provider_slo_trackers: Arc::new(Mutex::new(HashMap::new())),
             slo_target: config.slo_target,
+            slot_lag_alert_slots: config.slot_lag_alert_slots,
         })
     }
 
@@ -518,11 +522,15 @@ impl Metrics {
         let total = providers.len();
         let rr_seed = self.round_robin_cursor.fetch_add(1, AtomicOrdering::SeqCst) % total;
 
-        let best_slot = state
+        let slot_samples: Vec<u64> = state
             .values()
             .filter_map(|s| s.slots.get(commitment))
-            .max()
-            .unwrap_or(0);
+            .collect();
+        let best_slot = slot_samples.iter().copied().max().unwrap_or(0);
+        let min_slot = slot_samples.iter().copied().min().unwrap_or(best_slot);
+        let alert_base = self.slot_lag_alert_slots.max(1);
+        let skew_threshold = alert_base.saturating_mul(MULTI_CLUSTER_SPREAD_MULTIPLIER);
+        let cluster_skew = best_slot.saturating_sub(min_slot) > skew_threshold;
         let now = SystemTime::now();
         let mut scored: Vec<_> = providers
             .iter()
@@ -533,8 +541,11 @@ impl Metrics {
                     Some(s) => {
                         let slot_opt = s.slots.get(commitment);
                         let slots_behind = slot_opt.map(|slot| best_slot.saturating_sub(slot));
-                        let slot_penalty =
-                            compute_slot_penalty(slots_behind, self.slot_lag_penalty_ms);
+                        let slot_penalty = if cluster_skew {
+                            0.0
+                        } else {
+                            compute_slot_penalty(slots_behind, self.slot_lag_penalty_ms)
+                        };
                         let healthy_flag = s.healthy && (best_slot == 0 || slot_opt.is_some());
                         (
                             healthy_flag,
@@ -553,7 +564,11 @@ impl Metrics {
                             FALLBACK_LATENCY_MS,
                             0,
                             0,
-                            compute_slot_penalty(None, self.slot_lag_penalty_ms),
+                            if cluster_skew {
+                                0.0
+                            } else {
+                                compute_slot_penalty(None, self.slot_lag_penalty_ms)
+                            },
                         ),
                         None,
                     ),
@@ -1005,6 +1020,7 @@ mod tests {
     use super::*;
     use crate::config::{Config, OtelConfig, OtelExporter};
     use crate::registry::{Provider, Registry};
+    use std::collections::HashMap;
     use std::path::PathBuf;
 
     fn provider(name: &str, url: &str) -> Provider {
@@ -1120,6 +1136,44 @@ mod tests {
         assert!(card.tags.is_empty());
         assert_eq!(card.tag_multiplier, 1.0);
         assert_eq!(card.effective_weight, card.weight as f64);
+    }
+
+    #[tokio::test]
+    async fn slot_penalty_disabled_with_large_spread() {
+        let registry = Registry::from_providers(vec![
+            provider("Main", "https://main.example.com"),
+            provider("Alt", "https://alt.example.com"),
+        ])
+        .unwrap();
+        let config = test_config();
+        let metrics = Metrics::new(registry, &config).unwrap();
+
+        metrics
+            .record_health_success(
+                "Main",
+                Duration::from_millis(100),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(418_000_000)),
+            )
+            .await;
+        metrics
+            .record_health_success(
+                "Alt",
+                Duration::from_millis(100),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(2_000_000)),
+            )
+            .await;
+
+        let ranked = metrics.provider_ranked_list(Commitment::Finalized).await;
+        let scores: HashMap<_, _> = ranked
+            .into_iter()
+            .map(|(provider, score, _)| (provider.name, score))
+            .collect();
+
+        let diff = (scores["Main"] - scores["Alt"]).abs();
+        assert!(
+            diff < 1.0,
+            "score delta should be negligible when spread is large, got {diff}"
+        );
     }
 
     #[tokio::test]

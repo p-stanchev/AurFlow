@@ -2,24 +2,50 @@ groups:
   - name: orlb-slo
     interval: 1m
     rules:
-      - alert: ORLBHighErrorBudgetBurn
-        expr: avg_over_time(orlb_slo_error_budget_burn{window="5m"}[5m]) > 3
-        for: 5m
+      - alert: ORLBBurnCritical
+        expr: |
+          max_over_time(orlb_slo_error_budget_burn{window="5m"}[5m]) > 14
+          and max_over_time(orlb_slo_error_budget_burn{window="30m"}[30m]) > 14
+        for: 2m
         labels:
           severity: critical
         annotations:
-          summary: "ORLB error budget is burning fast"
+          summary: "ORLB error budget burning fast"
           description: |
-            The 5 minute burn rate is {{ $value | printf "%.2f" }}x budget. Investigate upstream errors or degraded providers.
-      - alert: ORLBLowAvailability30m
-        expr: avg_over_time(orlb_slo_availability_ratio{window="30m"}[30m]) < 0.995
-        for: 10m
+            Burn rate breached 14x on both 5m and 30m windows. High-severity incident: investigate request failures immediately.
+
+      - alert: ORLBBurnElevated
+        expr: |
+          max_over_time(orlb_slo_error_budget_burn{window="30m"}[30m]) > 6
+          and max_over_time(orlb_slo_error_budget_burn{window="2h"}[2h]) > 6
+        for: 30m
         labels:
           severity: warning
         annotations:
-          summary: "ORLB availability dipped below target"
+          summary: "ORLB sustained high burn rate"
           description: |
-            Rolling 30 minute availability is {{ $value | printf "%.3f" }}. Check provider health and recent incidents.
+            Burn rate is above 6x across the 30m and 2h windows. Sustained errors are eroding availability budget.
+
+      - alert: ORLBLowAvailabilityShort
+        expr: min_over_time(orlb_slo_availability_ratio{window="30m"}[30m]) < 0.995
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ORLB availability below SLO (30m)"
+          description: |
+            Rolling 30 minute availability dropped to {{ $value | printf "%.3f" }}. Verify upstream provider health.
+
+      - alert: ORLBLowAvailabilityLong
+        expr: min_over_time(orlb_slo_availability_ratio{window="2h"}[2h]) < 0.995
+        for: 45m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ORLB availability below SLO (2h)"
+          description: |
+            Rolling 2 hour availability is {{ $value | printf "%.3f" }}. Errors have been sustained; inspect routing and providers.
+
   - name: orlb-provider-health
     interval: 30s
     rules:
