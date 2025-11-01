@@ -178,7 +178,7 @@ When the stack is up on your local machine, the default entry points are:
 Set secrets for any private provider headers or API keys. The service is stateless so horizontal scaling is straightforward (just keep `providers.json` consistent across instances).
 
 ## Roadmap Ideas
-- Commitment-aware routing (processed/confirmed/finalized scoring).
+- ~~Commitment-aware routing (processed/confirmed/finalized scoring).~~ ✅
 - Subscription/WebSocket fan-out.
 - API key rate limiting and auth.
 - Edge deployments across regions, optional caching (e.g., `getLatestBlockhash`).
