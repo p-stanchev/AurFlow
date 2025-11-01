@@ -92,12 +92,12 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 - `GET /dashboard`   live Chart.js UI summarising provider health.
 
 ### Metrics Highlights
-- `orlb_requests_total{provider,method,status}` � counts per upstream and outcome.
-- `orlb_request_failures_total{provider,reason}` � upstream failures grouped by reason.
-- `orlb_retries_total{reason}` � retry invocations (transport/timeouts/status codes).
-- `orlb_hedges_total{reason}` � hedged request launches grouped by trigger (`timer`, `status`, etc.).
-- `orlb_provider_latency_ms{provider}` � latest latency measurement.
-- `orlb_provider_health{provider}` � `1` healthy, `0` degraded.
+- `orlb_requests_total{provider,method,status}`   counts per upstream and outcome.
+- `orlb_request_failures_total{provider,reason}`   upstream failures grouped by reason.
+- `orlb_retries_total{reason}`   retry invocations (transport/timeouts/status codes).
+- `orlb_hedges_total{reason}`   hedged request launches grouped by trigger (`timer`, `status`, etc.).
+- `orlb_provider_latency_ms{provider}`   latest latency measurement.
+- `orlb_provider_health{provider}`   `1` healthy, `0` degraded.
 ## Testing
 Unit-style tests live alongside the router and cover forwarding success, retry failover, and write-method rejection. Run the full suite with:
 ```bash
