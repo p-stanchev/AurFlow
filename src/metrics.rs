@@ -45,11 +45,15 @@ pub struct Metrics {
     slo_burn_rate: GaugeVec,
     slo_window_requests: GaugeVec,
     slo_window_errors: GaugeVec,
+    slo_provider_availability: GaugeVec,
+    slo_provider_error_rate: GaugeVec,
     prometheus_registry: PromRegistry,
     state: Arc<RwLock<HashMap<String, ProviderState>>>,
     round_robin_cursor: Arc<AtomicUsize>,
     slot_lag_penalty_ms: f64,
     slo_tracker: Arc<Mutex<SloTracker>>,
+    provider_slo_trackers: Arc<Mutex<HashMap<String, SloTracker>>>,
+    slo_target: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -178,6 +182,20 @@ impl Metrics {
             ),
             &["window"],
         )?;
+        let slo_provider_availability = GaugeVec::new(
+            Opts::new(
+                "provider_slo_availability_ratio",
+                "Provider availability ratio computed over rolling windows",
+            ),
+            &["provider", "window"],
+        )?;
+        let slo_provider_error_rate = GaugeVec::new(
+            Opts::new(
+                "provider_slo_error_ratio",
+                "Provider error ratio computed over rolling windows",
+            ),
+            &["provider", "window"],
+        )?;
 
         prometheus_registry.register(Box::new(request_counter.clone()))?;
         prometheus_registry.register(Box::new(request_failures.clone()))?;
@@ -192,6 +210,8 @@ impl Metrics {
         prometheus_registry.register(Box::new(slo_burn_rate.clone()))?;
         prometheus_registry.register(Box::new(slo_window_requests.clone()))?;
         prometheus_registry.register(Box::new(slo_window_errors.clone()))?;
+        prometheus_registry.register(Box::new(slo_provider_availability.clone()))?;
+        prometheus_registry.register(Box::new(slo_provider_error_rate.clone()))?;
 
         let mut initial_state = HashMap::new();
         for provider in registry.providers() {
@@ -199,6 +219,14 @@ impl Metrics {
                 .with_label_values(&[provider.name.as_str()])
                 .set(1);
             initial_state.insert(provider.name.clone(), ProviderState::new());
+            for (label, _) in SLO_WINDOWS {
+                slo_provider_availability
+                    .with_label_values(&[provider.name.as_str(), *label])
+                    .set(1.0);
+                slo_provider_error_rate
+                    .with_label_values(&[provider.name.as_str(), *label])
+                    .set(0.0);
+            }
         }
         for (label, _) in SLO_WINDOWS {
             slo_availability.with_label_values(&[*label]).set(1.0);
@@ -224,11 +252,15 @@ impl Metrics {
             slo_burn_rate,
             slo_window_requests,
             slo_window_errors,
+            slo_provider_availability,
+            slo_provider_error_rate,
             prometheus_registry,
             state: Arc::new(RwLock::new(initial_state)),
             round_robin_cursor: Arc::new(AtomicUsize::new(0)),
             slot_lag_penalty_ms: config.slot_lag_penalty_ms.max(0.0),
             slo_tracker,
+            provider_slo_trackers: Arc::new(Mutex::new(HashMap::new())),
+            slo_target: config.slo_target,
         })
     }
 
@@ -266,7 +298,7 @@ impl Metrics {
 
         self.provider_health.with_label_values(&[provider]).set(1);
 
-        self.update_slo(SloOutcome::Success).await;
+        self.update_slo(provider, SloOutcome::Success).await;
     }
 
     pub async fn record_request_failure(&self, provider: &str, method: &str, reason: &str) {
@@ -302,10 +334,10 @@ impl Metrics {
             self.provider_health.with_label_values(&[provider]).set(0);
         }
 
-        self.update_slo(SloOutcome::Failure).await;
+        self.update_slo(provider, SloOutcome::Failure).await;
     }
 
-    async fn update_slo(&self, outcome: SloOutcome) {
+    async fn update_slo(&self, provider: &str, outcome: SloOutcome) {
         let snapshots = {
             let mut tracker = self.slo_tracker.lock().await;
             tracker.record(outcome)
@@ -324,6 +356,29 @@ impl Metrics {
             self.slo_window_errors
                 .with_label_values(&[window])
                 .set(snapshot.errors as f64);
+        }
+
+        let provider_snapshots = {
+            let mut trackers = self.provider_slo_trackers.lock().await;
+            let tracker = trackers
+                .entry(provider.to_string())
+                .or_insert_with(|| SloTracker::new(self.slo_target));
+            tracker.record(outcome)
+        };
+        for snapshot in provider_snapshots {
+            let window = snapshot.window.as_str();
+            let labels = [provider, window];
+            self.slo_provider_availability
+                .with_label_values(&labels)
+                .set(snapshot.availability);
+            let error_ratio = if snapshot.total == 0 {
+                0.0
+            } else {
+                snapshot.errors as f64 / snapshot.total as f64
+            };
+            self.slo_provider_error_rate
+                .with_label_values(&labels)
+                .set(error_ratio);
         }
     }
 

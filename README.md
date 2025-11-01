@@ -32,7 +32,7 @@ Dockerfile              multi-stage build producing minimal image
 
 ## Getting Started
 ### Prerequisites
-- Rust 1.79+ (`rustup toolchain install 1.79.0`)
+- Rust 1.82+ (`rustup toolchain install 1.82.0`)
 - `cargo` and `rustfmt` (`rustup component add rustfmt clippy`)
 
 ### Run Locally
@@ -109,7 +109,8 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 ### Observability
 - **Tracing** - enable OpenTelemetry spans by setting `ORLB_OTEL_EXPORTER` to `stdout` (local debugging) or `otlp_http` plus `ORLB_OTEL_ENDPOINT` for collectors such as the upstream OTEL Collector. `ORLB_OTEL_SERVICE_NAME` customises the emitted `service.name` resource.
 - **Service-level objectives** - the SLO gauges exposed at `/metrics` track 5-minute and 30-minute availability windows and their burn rates against `ORLB_SLO_TARGET` (default 99.5%). These gauges back intuitive alert rules and time series panels.
-- **Dashboards & alerts** - import `ops/grafana/orlb-dashboard.json` into Grafana and point it at your Prometheus datasource to get request rate, SLO, and provider latency visualisations. `ops/alerts/orlb-alerts.yaml` provides matching Prometheus alert rules for burn-rate breaches and chronically unhealthy providers.
+- **Per-provider SLOs** - `orlb_provider_slo_availability_ratio{provider,window}` and `orlb_provider_slo_error_ratio{provider,window}` expose rolling availability and error shares for each upstream, feeding the Grafana panels.
+- **Dashboards & alerts** - import `ops/grafana/dashboards/orlb-dashboard.json` into Grafana and point it at your Prometheus datasource to get request rate, SLO, and provider latency visualisations. `ops/alerts/orlb-alerts.yaml` provides matching Prometheus alert rules for burn-rate breaches and chronically unhealthy providers.
 - **Quick checks** - `/metrics` now includes a `Refresh: 5` header so you can leave it open in a browser and watch gauges update in real time.
 
 ![Grafana ORLB overview dashboard](ops/grafana/orlb-dashboard.png)
@@ -122,9 +123,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ```
 Continuous integration in `.github/workflows/ci.yml` enforces the same checks.
+Run `bash scripts/smoke.sh` against a running instance to verify `/metrics` responds and Prometheus reports the `orlb` target as healthy.
 
 ## Docker
-Build and run the container:
+### Single-container quick start
 ```bash
 docker build -t orlb .
 docker run --rm -p 8080:8080 \
@@ -134,6 +136,21 @@ docker run --rm -p 8080:8080 \
 ```
 
 The runtime image is based on `debian:bookworm-slim`, bundles the compiled binary plus static assets, and installs CA certificates for TLS connections.
+
+### Full observability stack (Docker Compose)
+`docker-compose.yml` wires ORLB together with Prometheus, Alertmanager, and Grafana:
+```bash
+docker compose up --build
+```
+This stack:
+- builds the ORLB image locally and mounts `providers.json` for live edits.
+- loads Prometheus with `prometheus.yml`, automatically including alert rules from `ops/alerts/` and forwarding them to Alertmanager (`ops/alertmanager/alertmanager.yml`).
+- provisions Grafana with the Prometheus datasource and imports `ops/grafana/dashboards/orlb-dashboard.json` so the overview dashboard is ready immediately (default login `admin` / `admin`).
+
+Prometheus scrapes ORLB at `orlb:8080` inside the Compose network. If you run Prometheus outside of Compose, update `prometheus.yml` to target `localhost:8080` (or your host IP) and point Grafana at the correct Prometheus URL.
+If Alertmanager is not part of your deployment, remove or adjust the `alertmanagers` block in `prometheus.yml`.
+If you already have standalone containers named `prometheus`, `grafana`, or `alertmanager`, stop or remove them (`docker compose down` or `docker rm -f <name>`) before launching the stack to avoid name collisions.
+Run `bash scripts/stack-info.sh` (or `.\scripts\stack-info.ps1` on PowerShell) any time to print clickable URLs for the running services.
 
 ## Deploying to Fly.io (Example)
 1. Create `fly.toml` (simplified):

@@ -73,6 +73,102 @@
       "fieldConfig": {
         "defaults": {
           "custom": {},
+          "displayName": "${__field.labels.provider} (${__field.labels.window})",
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "id": 5,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "orlb_provider_slo_availability_ratio",
+          "legendFormat": "{{provider}} ({{window}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider availability (rolling)",
+      "transformations": [],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
+          "displayName": "${__field.labels.provider} (${__field.labels.window})",
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "$datasource"
+          },
+          "expr": "orlb_provider_slo_error_ratio",
+          "legendFormat": "{{provider}} ({{window}})",
+          "refId": "A"
+        }
+      ],
+      "title": "Provider error ratio (rolling)",
+      "transformations": [],
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "$datasource"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {},
           "displayName": "Availability (${__field.labels.window})",
           "max": 1,
           "min": 0,
@@ -109,7 +205,7 @@
           "refId": "A"
         }
       ],
-      "title": "Availability (rolling)",
+      "title": "Global availability (rolling)",
       "transformations": [],
       "type": "timeseries"
     },
@@ -131,7 +227,7 @@
         "h": 7,
         "w": 12,
         "x": 0,
-        "y": 8
+        "y": 15
       },
       "id": 3,
       "options": {
@@ -177,7 +273,7 @@
         "h": 7,
         "w": 12,
         "x": 12,
-        "y": 8
+        "y": 15
       },
       "id": 4,
       "options": {

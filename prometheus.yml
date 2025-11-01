@@ -1,8 +1,18 @@
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+rule_files:
+  - /etc/prometheus/rules/*.yaml
 
 scrape_configs:
   - job_name: orlb
     metrics_path: /metrics
     static_configs:
-      - targets: ['host.docker.internal:8080']
+      - targets: ['orlb:8080']
