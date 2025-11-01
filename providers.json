@@ -1,7 +1,17 @@
 [
   {
-    "name": "Solana Foundation",
+    "name": "Solana Foundation (mainnet)",
     "url": "https://api.mainnet-beta.solana.com",
+    "weight": 1
+  },
+  {
+    "name": "Solana Foundation (devnet)",
+    "url": "https://api.devnet.solana.com",
+    "weight": 1
+  },
+  {
+    "name": "Solana Foundation (testnet)",
+    "url": "https://api.testnet.solana.com",
     "weight": 1
   },
   {
@@ -10,13 +20,8 @@
     "weight": 1
   },
   {
-    "name": "Alchemy (demo)",
-    "url": "https://solana-mainnet.g.alchemy.com/v2/demo",
-    "weight": 1
-  },
-  {
-    "name": "QuikNode (docs demo)",
-    "url": "https://docs-demo.solana-mainnet.quiknode.pro",
+    "name": "dRPC",
+    "url": "https://solana.drpc.org/",
     "weight": 1
   },
   {

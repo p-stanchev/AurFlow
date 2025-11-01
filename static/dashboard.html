@@ -180,6 +180,10 @@
             <dd class="font-medium"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
+            <dt class="text-slate-400">Probe Pass / Fail</dt>
+            <dd class="font-medium"></dd>
+          </div>
+          <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Weighted Score</dt>
             <dd class="font-medium"></dd>
           </div>
@@ -263,6 +267,43 @@
 
       function formatScore(value) {
         return Number.isFinite(value) ? value.toFixed(2) : "—";
+      }
+
+      function formatCount(value) {
+        if (typeof value !== "number" || Number.isNaN(value)) {
+          return "0";
+        }
+        return value.toLocaleString("en-US");
+      }
+
+      function formatPercent(value) {
+        if (!Number.isFinite(value)) {
+          return "0";
+        }
+        const fixed = value.toFixed(1);
+        return fixed.endsWith(".0") ? fixed.slice(0, -2) : fixed;
+      }
+
+      function formatRequestCounts(success = 0, errors = 0) {
+        const ok = Number(success) || 0;
+        const fail = Number(errors) || 0;
+        const total = ok + fail;
+        if (total === 0) {
+          return "0 / 0 (no traffic)";
+        }
+        const rate = (ok / total) * 100;
+        return `${formatCount(ok)} / ${formatCount(fail)} (${formatPercent(rate)}% ok)`;
+      }
+
+      function formatProbeCounts(passes = 0, fails = 0) {
+        const ok = Number(passes) || 0;
+        const fail = Number(fails) || 0;
+        const total = ok + fail;
+        if (total === 0) {
+          return "0 / 0 (no probes)";
+        }
+        const rate = (ok / total) * 100;
+        return `${formatCount(ok)} / ${formatCount(fail)} (${formatPercent(rate)}% pass)`;
       }
 
       function formatTimestamp(ms) {
@@ -397,11 +438,42 @@
         avgLatencyEl.textContent = measured.length ? `${avgLatency.toFixed(1)} ms` : "n/a";
         const bestSlot =
           typeof snapshot.best_slot === "number" && snapshot.best_slot > 0 ? snapshot.best_slot : null;
+        const totalRequestSuccess = providers.reduce(
+          (sum, p) => sum + (Number(p.success) || 0),
+          0
+        );
+        const totalRequestErrors = providers.reduce(
+          (sum, p) => sum + (Number(p.errors) || 0),
+          0
+        );
+        const totalProbeSuccess = providers.reduce(
+          (sum, p) => sum + (Number(p.probe_success) || 0),
+          0
+        );
+        const totalProbeErrors = providers.reduce(
+          (sum, p) => sum + (Number(p.probe_errors) || 0),
+          0
+        );
+        const requestTotal = totalRequestSuccess + totalRequestErrors;
+        const trafficSummary =
+          requestTotal > 0
+            ? `traffic ${formatCount(totalRequestSuccess)} / ${formatCount(totalRequestErrors)} (${formatPercent(
+                (totalRequestSuccess / requestTotal) * 100
+              )}% ok)`
+            : "traffic idle";
+        const probeTotal = totalProbeSuccess + totalProbeErrors;
+        const probeSummary =
+          probeTotal > 0
+            ? `probes ${formatCount(totalProbeSuccess)} / ${formatCount(totalProbeErrors)} (${formatPercent(
+                (totalProbeSuccess / probeTotal) * 100
+              )}% pass)`
+            : "probes idle";
         if (measured.length) {
           const slotText = bestSlot != null ? `latest slot ${bestSlot}` : "awaiting slot data";
-          latencyDetailEl.textContent = `Across ${measured.length} providers reporting; ${slotText}`;
+          latencyDetailEl.textContent = `Across ${measured.length} providers reporting | ${slotText} | ${trafficSummary} | ${probeSummary}`;
         } else {
-          latencyDetailEl.textContent = "Waiting for probe data";
+          const slotText = bestSlot != null ? `latest slot ${bestSlot}` : "awaiting slot data";
+          latencyDetailEl.textContent = `Waiting for latency samples | ${slotText} | ${trafficSummary} | ${probeSummary}`;
         }
 
         lastUpdatedEl.textContent = formatTimestamp(snapshot.updated_at);
@@ -538,11 +610,12 @@
           const details = card.querySelectorAll("dd");
           details[0].textContent = formatMillis(provider.latency ?? provider.latency_ema);
           details[1].textContent = formatMillis(provider.latency_ema);
-          details[2].textContent = `${provider.success} / ${provider.errors}`;
-          details[3].textContent = formatScore(provider.score);
-          details[4].textContent = provider.last_slot ?? "--";
-          details[5].textContent = formatSlotLag(slotsBehind);
-          details[6].textContent = relativeTimeFrom(provider.last_updated_ms);
+          details[2].textContent = formatRequestCounts(provider.success, provider.errors);
+          details[3].textContent = formatProbeCounts(provider.probe_success, provider.probe_errors);
+          details[4].textContent = formatScore(provider.score);
+          details[5].textContent = provider.last_slot ?? "--";
+          details[6].textContent = formatSlotLag(slotsBehind);
+          details[7].textContent = relativeTimeFrom(provider.last_updated_ms);
 
           const footerSpans = card.querySelectorAll(".mt-6 span");
           footerSpans[0].textContent = `Weight ${provider.weight}`;

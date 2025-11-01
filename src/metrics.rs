@@ -46,8 +46,10 @@ pub struct Metrics {
 struct ProviderState {
     latency_ema_ms: f64,
     last_latency_ms: Option<f64>,
-    success_count: u64,
-    error_count: u64,
+    request_success_count: u64,
+    request_error_count: u64,
+    probe_success_count: u64,
+    probe_error_count: u64,
     consecutive_failures: u32,
     healthy: bool,
     last_slot: Option<u64>,
@@ -60,8 +62,10 @@ impl ProviderState {
         Self {
             latency_ema_ms: FALLBACK_LATENCY_MS,
             last_latency_ms: None,
-            success_count: 0,
-            error_count: 0,
+            request_success_count: 0,
+            request_error_count: 0,
+            probe_success_count: 0,
+            probe_error_count: 0,
             consecutive_failures: 0,
             healthy: true,
             last_slot: None,
@@ -78,6 +82,8 @@ pub struct DashboardProvider {
     pub latency_ema: f64,
     pub success: u64,
     pub errors: u64,
+    pub probe_success: u64,
+    pub probe_errors: u64,
     pub healthy: bool,
     pub consecutive_failures: u32,
     pub last_slot: Option<u64>,
@@ -192,7 +198,7 @@ impl Metrics {
             let state = guard
                 .entry(provider.to_string())
                 .or_insert_with(ProviderState::new);
-            state.success_count = state.success_count.saturating_add(1);
+            state.request_success_count = state.request_success_count.saturating_add(1);
             state.consecutive_failures = 0;
             state.healthy = true;
             state.last_latency_ms = Some(latency_ms);
@@ -227,7 +233,7 @@ impl Metrics {
             let state = guard
                 .entry(provider.to_string())
                 .or_insert_with(ProviderState::new);
-            state.error_count = state.error_count.saturating_add(1);
+            state.request_error_count = state.request_error_count.saturating_add(1);
             state.consecutive_failures = (state.consecutive_failures + 1).min(16);
             if state.consecutive_failures >= FAILURE_HEALTH_THRESHOLD {
                 state.healthy = false;
@@ -269,6 +275,7 @@ impl Metrics {
             let state = guard
                 .entry(provider.to_string())
                 .or_insert_with(ProviderState::new);
+            state.probe_success_count = state.probe_success_count.saturating_add(1);
             state.healthy = true;
             state.consecutive_failures = 0;
             state.last_latency_ms = Some(latency_ms);
@@ -304,7 +311,7 @@ impl Metrics {
             let state = guard
                 .entry(provider.to_string())
                 .or_insert_with(ProviderState::new);
-            state.error_count = state.error_count.saturating_add(1);
+            state.probe_error_count = state.probe_error_count.saturating_add(1);
             state.consecutive_failures = (state.consecutive_failures + 1).min(16);
             if state.consecutive_failures >= FAILURE_HEALTH_THRESHOLD {
                 state.healthy = false;
@@ -350,7 +357,7 @@ impl Metrics {
                             compute_score(
                                 s.latency_ema_ms,
                                 s.consecutive_failures,
-                                s.error_count,
+                                s.request_error_count.saturating_add(s.probe_error_count),
                                 slot_penalty,
                             ),
                             s.quarantined_until,
@@ -415,8 +422,10 @@ impl Metrics {
                 let (
                     latency,
                     ema,
-                    success,
-                    errors,
+                    request_success,
+                    request_errors,
+                    probe_success,
+                    probe_errors,
                     healthy,
                     failures,
                     slot,
@@ -427,8 +436,10 @@ impl Metrics {
                         (
                             s.last_latency_ms,
                             s.latency_ema_ms,
-                            s.success_count,
-                            s.error_count,
+                            s.request_success_count,
+                            s.request_error_count,
+                            s.probe_success_count,
+                            s.probe_error_count,
                             s.healthy,
                             s.consecutive_failures,
                             s.last_slot,
@@ -441,6 +452,8 @@ impl Metrics {
                         FALLBACK_LATENCY_MS,
                         0,
                         0,
+                        0,
+                        0,
                         true,
                         0,
                         None,
@@ -449,7 +462,8 @@ impl Metrics {
                     ));
                 let slots_behind = slot.map(|value| best_slot_value.saturating_sub(value));
                 let slot_penalty = compute_slot_penalty(slots_behind, self.slot_lag_penalty_ms);
-                let raw_score = compute_score(ema, failures, errors, slot_penalty);
+                let total_errors = request_errors.saturating_add(probe_errors);
+                let raw_score = compute_score(ema, failures, total_errors, slot_penalty);
                 let weighted_score = raw_score / provider.weight.max(1) as f64;
                 let quarantined = matches!(quarantined_until, Some(deadline) if deadline > now);
                 let healthy_display = healthy && !quarantined;
@@ -458,8 +472,10 @@ impl Metrics {
                     name: provider.name.clone(),
                     latency,
                     latency_ema: ema,
-                    success,
-                    errors,
+                    success: request_success,
+                    errors: request_errors,
+                    probe_success,
+                    probe_errors,
                     healthy: healthy_display,
                     consecutive_failures: failures,
                     last_slot: slot,
@@ -648,5 +664,36 @@ mod tests {
             .find(|p| p.name == "Fresh")
             .expect("fresh provider present");
         assert!(stale_card.score > fresh_card.score);
+    }
+
+    #[tokio::test]
+    async fn dashboard_snapshot_tracks_request_and_probe_counts() {
+        let registry =
+            Registry::from_providers(vec![provider("Solo", "https://solo.example.com")]).unwrap();
+        let config = test_config();
+        let metrics = Metrics::new(registry, &config).unwrap();
+
+        metrics
+            .record_request_success("Solo", "getSlot", Duration::from_millis(25))
+            .await;
+        metrics
+            .record_request_failure("Solo", "getSlot", "status_500")
+            .await;
+        metrics
+            .record_health_success("Solo", Duration::from_millis(30), Some(1_234))
+            .await;
+        metrics.record_health_failure("Solo", "timeout").await;
+
+        let snapshot = metrics.dashboard_snapshot().await;
+        let card = snapshot
+            .providers
+            .iter()
+            .find(|p| p.name == "Solo")
+            .expect("provider present");
+
+        assert_eq!(card.success, 1);
+        assert_eq!(card.errors, 1);
+        assert_eq!(card.probe_success, 1);
+        assert_eq!(card.probe_errors, 1);
     }
 }
