@@ -151,6 +151,11 @@ Prometheus scrapes ORLB at `orlb:8080` inside the Compose network. If you run Pr
 If Alertmanager is not part of your deployment, remove or adjust the `alertmanagers` block in `prometheus.yml`.
 If you already have standalone containers named `prometheus`, `grafana`, or `alertmanager`, stop or remove them (`docker compose down` or `docker rm -f <name>`) before launching the stack to avoid name collisions.
 Run `bash scripts/stack-info.sh` (or `.\scripts\stack-info.ps1` on PowerShell) any time to print clickable URLs for the running services.
+When the stack is up on your local machine, the default entry points are:
+- [ORLB metrics](http://localhost:8080/metrics)
+- [Prometheus UI](http://localhost:9090/)
+- [Alertmanager UI](http://localhost:9093/)
+- [Grafana UI](http://localhost:3000/) (login `admin` / `admin` by default)
 
 ## Deploying to Fly.io (Example)
 1. Create `fly.toml` (simplified):
