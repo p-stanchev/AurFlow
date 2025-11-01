@@ -73,7 +73,7 @@
       "fieldConfig": {
         "defaults": {
           "custom": {},
-          "displayName": "{{window}}",
+          "displayName": "Availability (${__field.labels.window})",
           "max": 1,
           "min": 0,
           "unit": "percentunit"
@@ -105,7 +105,7 @@
             "uid": "$datasource"
           },
           "expr": "orlb_slo_availability_ratio",
-          "legendFormat": "{{window}}",
+          "legendFormat": "Availability ({{window}})",
           "refId": "A"
         }
       ],
@@ -121,7 +121,7 @@
       "fieldConfig": {
         "defaults": {
           "custom": {},
-          "displayName": "{{window}}",
+          "displayName": "Error budget burn (${__field.labels.window})",
           "min": 0,
           "unit": "ratio"
         },
@@ -152,7 +152,7 @@
             "uid": "$datasource"
           },
           "expr": "orlb_slo_error_budget_burn",
-          "legendFormat": "{{window}}",
+          "legendFormat": "Burn rate ({{window}})",
           "refId": "A"
         }
       ],

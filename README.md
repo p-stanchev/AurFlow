@@ -111,6 +111,9 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 - **Service-level objectives** - the SLO gauges exposed at `/metrics` track 5-minute and 30-minute availability windows and their burn rates against `ORLB_SLO_TARGET` (default 99.5%). These gauges back intuitive alert rules and time series panels.
 - **Dashboards & alerts** - import `ops/grafana/orlb-dashboard.json` into Grafana and point it at your Prometheus datasource to get request rate, SLO, and provider latency visualisations. `ops/alerts/orlb-alerts.yaml` provides matching Prometheus alert rules for burn-rate breaches and chronically unhealthy providers.
 - **Quick checks** - `/metrics` now includes a `Refresh: 5` header so you can leave it open in a browser and watch gauges update in real time.
+
+![Grafana ORLB overview dashboard](ops/grafana/orlb-dashboard.png)
+_Grafana dashboard showing live request rates, error-budget burn, and provider latency once Prometheus is scraping ORLB._
 ## Testing
 Unit-style tests live alongside the router and cover forwarding success, retry failover, and write-method rejection. Run the full suite with:
 ```bash
