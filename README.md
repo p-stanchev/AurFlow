@@ -65,6 +65,10 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_SLOT_LAG_ALERT_SLOTS` | `50` | `orlb doctor` warns when a provider lags this many slots |
 | `ORLB_HEDGE_REQUESTS` | `false` | Launch a hedged request when the primary read call stalls |
 | `ORLB_HEDGE_DELAY_MS` | `60` | Delay before the hedged provider is attempted |
+| `ORLB_SLO_TARGET` | `0.995` | Availability target used for rolling SLO burn-rate calculations |
+| `ORLB_OTEL_EXPORTER` | `none` | OpenTelemetry exporter (`none`, `stdout`, or `otlp_http`) |
+| `ORLB_OTEL_ENDPOINT` | unset | OTLP endpoint when `ORLB_OTEL_EXPORTER=otlp_http` (e.g. `http://collector:4318`) |
+| `ORLB_OTEL_SERVICE_NAME` | `orlb` | Service name attribute attached to emitted spans |
 
 `providers.json` format:
 ```json
@@ -87,7 +91,7 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 
 ### HTTP Endpoints
 - `POST /rpc`   JSON-RPC forwarding (read-only enforced, retries once on retryable failures).
-- `GET /metrics`   Prometheus text format metrics (`orlb_requests_total`, `orlb_provider_latency_ms`, etc.).
+- `GET /metrics`   Prometheus text format metrics (`orlb_requests_total`, `orlb_provider_latency_ms`, etc.), auto-refreshing every 5 seconds in a browser tab.
 - `GET /metrics.json`   JSON snapshot powering the dashboard.
 - `GET /dashboard`   live Chart.js UI summarising provider health.
 
@@ -98,6 +102,15 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 - `orlb_hedges_total{reason}`   hedged request launches grouped by trigger (`timer`, `status`, etc.).
 - `orlb_provider_latency_ms{provider}`   latest latency measurement.
 - `orlb_provider_health{provider}`   `1` healthy, `0` degraded.
+- `orlb_slo_availability_ratio{window}`   rolling availability for predefined SLO windows (`5m`, `30m`).
+- `orlb_slo_error_budget_burn{window}`   error-budget burn rate normalised against `ORLB_SLO_TARGET`.
+- `orlb_slo_window_requests{window}` / `orlb_slo_window_errors{window}`   sample sizes that back the SLO gauges.
+
+### Observability
+- **Tracing** - enable OpenTelemetry spans by setting `ORLB_OTEL_EXPORTER` to `stdout` (local debugging) or `otlp_http` plus `ORLB_OTEL_ENDPOINT` for collectors such as the upstream OTEL Collector. `ORLB_OTEL_SERVICE_NAME` customises the emitted `service.name` resource.
+- **Service-level objectives** - the SLO gauges exposed at `/metrics` track 5-minute and 30-minute availability windows and their burn rates against `ORLB_SLO_TARGET` (default 99.5%). These gauges back intuitive alert rules and time series panels.
+- **Dashboards & alerts** - import `ops/grafana/orlb-dashboard.json` into Grafana and point it at your Prometheus datasource to get request rate, SLO, and provider latency visualisations. `ops/alerts/orlb-alerts.yaml` provides matching Prometheus alert rules for burn-rate breaches and chronically unhealthy providers.
+- **Quick checks** - `/metrics` now includes a `Refresh: 5` header so you can leave it open in a browser and watch gauges update in real time.
 ## Testing
 Unit-style tests live alongside the router and cover forwarding success, retry failover, and write-method rejection. Run the full suite with:
 ```bash

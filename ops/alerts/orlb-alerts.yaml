@@ -1,0 +1,34 @@
+groups:
+  - name: orlb-slo
+    interval: 1m
+    rules:
+      - alert: ORLBHighErrorBudgetBurn
+        expr: avg_over_time(orlb_slo_error_budget_burn{window="5m"}[5m]) > 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "ORLB error budget is burning fast"
+          description: |
+            The 5 minute burn rate is {{ $value | printf "%.2f" }}x budget. Investigate upstream errors or degraded providers.
+      - alert: ORLBLowAvailability30m
+        expr: avg_over_time(orlb_slo_availability_ratio{window="30m"}[30m]) < 0.995
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ORLB availability dipped below target"
+          description: |
+            Rolling 30 minute availability is {{ $value | printf "%.3f" }}. Check provider health and recent incidents.
+  - name: orlb-provider-health
+    interval: 30s
+    rules:
+      - alert: ORLBProviderQuarantined
+        expr: min_over_time(orlb_provider_health[3m]) == 0
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ORLB provider has been unhealthy for 3 minutes"
+          description: |
+            Provider {{ $labels.provider }} is unhealthy or quarantined. Confirm upstream status and routing behaviour.

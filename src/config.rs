@@ -18,6 +18,23 @@ pub struct Config {
     pub slot_lag_alert_slots: u64,
     pub hedge_requests: bool,
     pub hedge_delay: Duration,
+    pub slo_target: f64,
+    pub otel: OtelConfig,
+}
+
+/// OpenTelemetry configuration derived from environment variables.
+#[derive(Clone, Debug)]
+pub struct OtelConfig {
+    pub exporter: OtelExporter,
+    pub service_name: String,
+}
+
+/// Supported OpenTelemetry exporters.
+#[derive(Clone, Debug)]
+pub enum OtelExporter {
+    None,
+    Stdout,
+    OtlpHttp { endpoint: String },
 }
 
 impl Config {
@@ -52,6 +69,27 @@ impl Config {
             Duration::from_millis(5),
             Duration::from_millis(500),
         );
+        let slo_target = clamp_f64(
+            parse_env("ORLB_SLO_TARGET", "0.995", parse_f64)?,
+            0.9,
+            0.9999,
+        );
+        let otel_service_name = parse_env("ORLB_OTEL_SERVICE_NAME", "orlb", parse_string)?
+            .trim()
+            .to_string();
+        let otel_exporter_raw = env::var("ORLB_OTEL_EXPORTER")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "none".to_string());
+        let otel_endpoint = env::var("ORLB_OTEL_ENDPOINT").ok().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        let otel_exporter = parse_otel_exporter(&otel_exporter_raw, otel_endpoint)?;
 
         Ok(Self {
             listen_addr,
@@ -64,6 +102,11 @@ impl Config {
             slot_lag_alert_slots,
             hedge_requests,
             hedge_delay,
+            slo_target,
+            otel: OtelConfig {
+                exporter: otel_exporter,
+                service_name: otel_service_name,
+            },
         })
     }
 }
@@ -129,6 +172,24 @@ fn parse_bool(input: &str) -> Result<bool> {
         "true" | "1" | "yes" | "y" => Ok(true),
         "false" | "0" | "no" | "n" => Ok(false),
         _ => Err(anyhow!("invalid boolean `{input}`")),
+    }
+}
+
+fn parse_string(input: &str) -> Result<String> {
+    Ok(input.to_string())
+}
+
+fn parse_otel_exporter(value: &str, endpoint: Option<String>) -> Result<OtelExporter> {
+    match value.to_ascii_lowercase().as_str() {
+        "" | "none" => Ok(OtelExporter::None),
+        "stdout" => Ok(OtelExporter::Stdout),
+        "otlp_http" | "otlp-http" => {
+            let endpoint = endpoint.ok_or_else(|| {
+                anyhow!("ORLB_OTEL_ENDPOINT must be set when ORLB_OTEL_EXPORTER=otlp_http")
+            })?;
+            Ok(OtelExporter::OtlpHttp { endpoint })
+        }
+        other => Err(anyhow!("unsupported OTLP exporter `{other}`")),
     }
 }
 

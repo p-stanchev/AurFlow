@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::body::to_bytes;
-use hyper::header::{HeaderName, HeaderValue, CONTENT_TYPE};
+use hyper::header::{HeaderName, HeaderValue, ALLOW, CONTENT_TYPE};
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use once_cell::sync::Lazy;
@@ -87,6 +87,7 @@ async fn route(req: Request<Body>, state: Arc<AppState>) -> Response<Body> {
             Ok(response) => response,
             Err((err, id)) => error_response(err, id),
         },
+        (&Method::GET, RPC_PATH) => method_not_allowed(),
         (&Method::GET, METRICS_PATH) => handle_metrics(&state).await,
         (&Method::GET, METRICS_JSON_PATH) => handle_metrics_json(&state).await,
         (&Method::GET, DASHBOARD_PATH) | (&Method::GET, "/") => {
@@ -425,6 +426,10 @@ async fn handle_metrics(state: &AppState) -> Response<Body> {
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")
             .header(hyper::header::CACHE_CONTROL, "no-store")
+            .header(
+                HeaderName::from_static("refresh"),
+                HeaderValue::from_static("5"),
+            )
             .body(Body::from(metrics))
             .unwrap(),
         Err(err) => {
@@ -513,6 +518,23 @@ fn not_found() -> Response<Body> {
             json!({
                 "error": {
                     "message": "not found"
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap()
+}
+
+fn method_not_allowed() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ALLOW, "POST")
+        .body(Body::from(
+            json!({
+                "error": {
+                    "message": "use POST with a JSON-RPC payload",
+                    "sample_curl": "curl -X POST http://localhost:8080/rpc -H 'content-type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSlot\",\"params\":[]}'"
                 }
             })
             .to_string(),
@@ -634,6 +656,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    use crate::config::{Config, OtelConfig, OtelExporter};
     use crate::forward::build_http_client;
     use crate::registry::{Provider, Registry};
 
@@ -649,6 +672,11 @@ mod tests {
             slot_lag_alert_slots: 50,
             hedge_requests: false,
             hedge_delay: Duration::from_millis(60),
+            slo_target: 0.995,
+            otel: OtelConfig {
+                exporter: OtelExporter::None,
+                service_name: "orlb-test".into(),
+            },
         }
     }
 

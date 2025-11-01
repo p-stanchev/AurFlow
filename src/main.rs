@@ -7,9 +7,9 @@ mod health;
 mod metrics;
 mod registry;
 mod router;
+mod telemetry;
 
 use anyhow::Result;
-use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
 use crate::forward::build_http_client;
@@ -18,13 +18,12 @@ use crate::registry::Registry;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    setup_tracing()?;
-
     let mut args = std::env::args();
     let _ = args.next();
     let subcommand = args.next();
 
     let config = Config::from_env()?;
+    let _telemetry = telemetry::init(&config)?;
     let registry = Registry::load(&config.providers_path)?;
 
     if matches!(subcommand.as_deref(), Some("doctor")) {
@@ -61,15 +60,4 @@ async fn main() -> Result<()> {
     });
 
     router::start_server(config, metrics, client).await
-}
-
-fn setup_tracing() -> Result<()> {
-    let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("orlb=info,hyper=warn,reqwest=warn"))?;
-    tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(true)
-        .compact()
-        .init();
-    Ok(())
 }

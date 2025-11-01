@@ -1,8 +1,8 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use once_cell::sync::Lazy;
@@ -11,7 +11,7 @@ use prometheus::{
     Registry as PromRegistry, TextEncoder,
 };
 use serde::Serialize;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::config::Config;
 use crate::registry::{Provider, Registry};
@@ -23,6 +23,11 @@ const FALLBACK_LATENCY_MS: f64 = 400.0;
 const FAILURE_HEALTH_THRESHOLD: u32 = 3;
 const QUARANTINE_BASE_SECS: u64 = 15;
 const QUARANTINE_MAX_SECS: u64 = 300;
+const SLO_BUCKET_WIDTH: Duration = Duration::from_secs(10);
+const SLO_WINDOWS: &[(&str, Duration)] = &[
+    ("5m", Duration::from_secs(300)),
+    ("30m", Duration::from_secs(1800)),
+];
 
 #[derive(Clone)]
 pub struct Metrics {
@@ -36,10 +41,15 @@ pub struct Metrics {
     provider_slot: GaugeVec,
     provider_errors: IntCounterVec,
     hedges: IntCounterVec,
+    slo_availability: GaugeVec,
+    slo_burn_rate: GaugeVec,
+    slo_window_requests: GaugeVec,
+    slo_window_errors: GaugeVec,
     prometheus_registry: PromRegistry,
     state: Arc<RwLock<HashMap<String, ProviderState>>>,
     round_robin_cursor: Arc<AtomicUsize>,
     slot_lag_penalty_ms: f64,
+    slo_tracker: Arc<Mutex<SloTracker>>,
 }
 
 #[derive(Clone, Debug)]
@@ -143,6 +153,31 @@ impl Metrics {
             Opts::new("hedges_total", "Hedged request launches by reason"),
             &["reason"],
         )?;
+        let slo_availability = GaugeVec::new(
+            Opts::new("slo_availability_ratio", "Rolling availability ratio"),
+            &["window"],
+        )?;
+        let slo_burn_rate = GaugeVec::new(
+            Opts::new(
+                "slo_error_budget_burn",
+                "Error budget burn rate computed against ORLB_SLO_TARGET",
+            ),
+            &["window"],
+        )?;
+        let slo_window_requests = GaugeVec::new(
+            Opts::new(
+                "slo_window_requests",
+                "Total requests observed within the rolling window",
+            ),
+            &["window"],
+        )?;
+        let slo_window_errors = GaugeVec::new(
+            Opts::new(
+                "slo_window_errors",
+                "Total errors observed within the rolling window",
+            ),
+            &["window"],
+        )?;
 
         prometheus_registry.register(Box::new(request_counter.clone()))?;
         prometheus_registry.register(Box::new(request_failures.clone()))?;
@@ -153,6 +188,10 @@ impl Metrics {
         prometheus_registry.register(Box::new(provider_slot.clone()))?;
         prometheus_registry.register(Box::new(provider_errors.clone()))?;
         prometheus_registry.register(Box::new(hedges.clone()))?;
+        prometheus_registry.register(Box::new(slo_availability.clone()))?;
+        prometheus_registry.register(Box::new(slo_burn_rate.clone()))?;
+        prometheus_registry.register(Box::new(slo_window_requests.clone()))?;
+        prometheus_registry.register(Box::new(slo_window_errors.clone()))?;
 
         let mut initial_state = HashMap::new();
         for provider in registry.providers() {
@@ -161,6 +200,14 @@ impl Metrics {
                 .set(1);
             initial_state.insert(provider.name.clone(), ProviderState::new());
         }
+        for (label, _) in SLO_WINDOWS {
+            slo_availability.with_label_values(&[*label]).set(1.0);
+            slo_burn_rate.with_label_values(&[*label]).set(0.0);
+            slo_window_requests.with_label_values(&[*label]).set(0.0);
+            slo_window_errors.with_label_values(&[*label]).set(0.0);
+        }
+
+        let slo_tracker = Arc::new(Mutex::new(SloTracker::new(config.slo_target)));
 
         Ok(Self {
             registry,
@@ -173,10 +220,15 @@ impl Metrics {
             provider_slot,
             provider_errors,
             hedges,
+            slo_availability,
+            slo_burn_rate,
+            slo_window_requests,
+            slo_window_errors,
             prometheus_registry,
             state: Arc::new(RwLock::new(initial_state)),
             round_robin_cursor: Arc::new(AtomicUsize::new(0)),
             slot_lag_penalty_ms: config.slot_lag_penalty_ms.max(0.0),
+            slo_tracker,
         })
     }
 
@@ -213,6 +265,8 @@ impl Metrics {
         }
 
         self.provider_health.with_label_values(&[provider]).set(1);
+
+        self.update_slo(SloOutcome::Success).await;
     }
 
     pub async fn record_request_failure(&self, provider: &str, method: &str, reason: &str) {
@@ -246,6 +300,30 @@ impl Metrics {
 
         if mark_unhealthy {
             self.provider_health.with_label_values(&[provider]).set(0);
+        }
+
+        self.update_slo(SloOutcome::Failure).await;
+    }
+
+    async fn update_slo(&self, outcome: SloOutcome) {
+        let snapshots = {
+            let mut tracker = self.slo_tracker.lock().await;
+            tracker.record(outcome)
+        };
+        for snapshot in snapshots {
+            let window = snapshot.window.as_str();
+            self.slo_availability
+                .with_label_values(&[window])
+                .set(snapshot.availability);
+            self.slo_burn_rate
+                .with_label_values(&[window])
+                .set(snapshot.burn_rate);
+            self.slo_window_requests
+                .with_label_values(&[window])
+                .set(snapshot.total as f64);
+            self.slo_window_errors
+                .with_label_values(&[window])
+                .set(snapshot.errors as f64);
         }
     }
 
@@ -599,9 +677,167 @@ fn system_time_to_millis(time: SystemTime) -> u64 {
         .as_millis() as u64
 }
 
+#[derive(Clone, Copy)]
+enum SloOutcome {
+    Success,
+    Failure,
+}
+
+struct SloTracker {
+    target: f64,
+    windows: Vec<SloWindow>,
+}
+
+impl SloTracker {
+    fn new(target: f64) -> Self {
+        let clamped_target = target.clamp(0.0, 0.999_999);
+        let windows = SLO_WINDOWS
+            .iter()
+            .map(|(label, duration)| SloWindow::new(label, *duration, SLO_BUCKET_WIDTH))
+            .collect();
+        Self {
+            target: clamped_target,
+            windows,
+        }
+    }
+
+    fn record(&mut self, outcome: SloOutcome) -> Vec<SloSnapshot> {
+        let now = Instant::now();
+        let mut snapshots = Vec::with_capacity(self.windows.len());
+
+        for window in &mut self.windows {
+            window.record(outcome, now);
+            let total = window.total();
+            let errors = window.errors();
+            let availability = if total == 0 {
+                1.0
+            } else {
+                ((total - errors) as f64 / total as f64).clamp(0.0, 1.0)
+            };
+            let error_rate = (1.0 - availability).clamp(0.0, 1.0);
+            let error_budget = (1.0 - self.target).max(1e-6);
+            let burn_rate = error_rate / error_budget;
+
+            snapshots.push(SloSnapshot {
+                window: window.label.clone(),
+                availability,
+                burn_rate,
+                total,
+                errors,
+            });
+        }
+
+        snapshots
+    }
+}
+
+struct SloSnapshot {
+    window: String,
+    availability: f64,
+    burn_rate: f64,
+    total: u64,
+    errors: u64,
+}
+
+struct SloWindow {
+    label: String,
+    duration: Duration,
+    bucket_width: Duration,
+    epoch: Instant,
+    buckets: VecDeque<Bucket>,
+    total_success: u64,
+    total_failure: u64,
+}
+
+impl SloWindow {
+    fn new(label: &str, duration: Duration, bucket_width: Duration) -> Self {
+        Self {
+            label: label.to_string(),
+            duration,
+            bucket_width,
+            epoch: Instant::now(),
+            buckets: VecDeque::new(),
+            total_success: 0,
+            total_failure: 0,
+        }
+    }
+
+    fn record(&mut self, outcome: SloOutcome, now: Instant) {
+        let bucket_index = self.bucket_index(now);
+        self.prune(bucket_index);
+
+        if self
+            .buckets
+            .back()
+            .map(|bucket| bucket.index != bucket_index)
+            .unwrap_or(true)
+        {
+            self.buckets.push_back(Bucket {
+                index: bucket_index,
+                success: 0,
+                failure: 0,
+            });
+        }
+
+        if let Some(bucket) = self.buckets.back_mut() {
+            match outcome {
+                SloOutcome::Success => {
+                    bucket.success = bucket.success.saturating_add(1);
+                    self.total_success = self.total_success.saturating_add(1);
+                }
+                SloOutcome::Failure => {
+                    bucket.failure = bucket.failure.saturating_add(1);
+                    self.total_failure = self.total_failure.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn prune(&mut self, current_index: u64) {
+        let capacity = self.window_capacity();
+        let min_index = current_index.saturating_sub(capacity);
+        while let Some(front) = self.buckets.front() {
+            if front.index < min_index {
+                if let Some(bucket) = self.buckets.pop_front() {
+                    self.total_success = self.total_success.saturating_sub(bucket.success);
+                    self.total_failure = self.total_failure.saturating_sub(bucket.failure);
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn window_capacity(&self) -> u64 {
+        let bucket_secs = self.bucket_width.as_secs().max(1);
+        (self.duration.as_secs() + bucket_secs - 1) / bucket_secs
+    }
+
+    fn bucket_index(&self, now: Instant) -> u64 {
+        let elapsed = now.saturating_duration_since(self.epoch);
+        let bucket_secs = self.bucket_width.as_secs().max(1);
+        elapsed.as_secs() / bucket_secs
+    }
+
+    fn total(&self) -> u64 {
+        self.total_success + self.total_failure
+    }
+
+    fn errors(&self) -> u64 {
+        self.total_failure
+    }
+}
+
+struct Bucket {
+    index: u64,
+    success: u64,
+    failure: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Config, OtelConfig, OtelExporter};
     use crate::registry::{Provider, Registry};
     use std::path::PathBuf;
 
@@ -626,6 +862,11 @@ mod tests {
             slot_lag_alert_slots: 50,
             hedge_requests: false,
             hedge_delay: Duration::from_millis(60),
+            slo_target: 0.995,
+            otel: OtelConfig {
+                exporter: OtelExporter::None,
+                service_name: "orlb-test".into(),
+            },
         }
     }
 
