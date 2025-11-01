@@ -35,16 +35,21 @@
       ></div>
 
       <main class="relative z-10 mx-auto flex min-h-[100vh] w-full max-w-6xl flex-col gap-10 px-6 py-12">
+        <div
+          id="errorBanner"
+          class="hidden rounded-3xl border border-red-400/30 bg-red-500/10 px-6 py-3 text-sm text-red-200 shadow-lg shadow-red-900/30"
+          role="alert"
+        ></div>
         <header class="rounded-3xl border border-white/10 bg-white/5 px-8 py-10 shadow-xl shadow-aurora/5 backdrop-blur">
           <div class="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
             <div>
               <p class="text-sm uppercase tracking-[0.3em] text-slate-400">Open RPC Load Balancer</p>
               <h1 class="mt-2 text-3xl font-semibold md:text-4xl">Provider Command Console</h1>
               <p class="mt-3 max-w-xl text-sm text-slate-400">
-                Inspect live RPC health, route scores, and probe history at a glance. Use the refresh button whenever you need a fresh snapshot -- no auto reloads.
+                Inspect live RPC health, route scores, and probe history at a glance. Snapshots auto refresh every 5 seconds; tap the button any time you want an instant update.
               </p>
             </div>
-            <div class="flex items-center gap-3">
+            <div class="flex flex-col items-end gap-3 text-right">
               <button
                 id="refreshButton"
                 type="button"
@@ -53,6 +58,23 @@
                 <span class="inline-flex h-2.5 w-2.5 items-center justify-center rounded-full bg-white/80 shadow-inner shadow-white/40"></span>
                 <span>Refresh snapshot</span>
               </button>
+              <div class="flex items-center gap-2 text-xs text-slate-300">
+                <label
+                  for="autoRefreshToggle"
+                  class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 shadow-inner shadow-black/40 transition hover:border-white/20"
+                >
+                  <input
+                    id="autoRefreshToggle"
+                    type="checkbox"
+                    class="h-4 w-4 rounded border-white/30 bg-slate-900/60 text-aurora focus:ring-aurora/60"
+                    checked
+                  />
+                  <span class="font-medium uppercase tracking-[0.2em] text-slate-400">Auto</span>
+                </label>
+                <span id="autoRefreshStatus" class="rounded-full border border-white/10 bg-white/10 px-2 py-1 font-medium tracking-wide text-slate-300" aria-live="polite">
+                  Next in 5s
+                </span>
+              </div>
             </div>
           </div>
 
@@ -193,25 +215,33 @@
       const lastUpdatedEl = document.getElementById("lastUpdated");
       const updatedAgoEl = document.getElementById("updatedAgo");
       const refreshButton = document.getElementById("refreshButton");
+      const autoRefreshToggle = document.getElementById("autoRefreshToggle");
+      const autoRefreshStatusEl = document.getElementById("autoRefreshStatus");
+      const errorBanner = document.getElementById("errorBanner");
 
       const metricToggle = document.getElementById("metricToggle");
       const metricButtons = Array.from(metricToggle.querySelectorAll(".metric-toggle"));
-      let currentMetric = "latency";
-
+      const AUTO_REFRESH_INTERVAL_MS = 5000;
       let latencyChart = null;
+      let currentMetric = "latency";
       let lastSnapshot = null;
+      let autoRefreshEnabled = true;
+      let autoRefreshTimeoutId = null;
+      let autoRefreshCountdownId = null;
+      let nextRefreshAt = null;
+      autoRefreshEnabled = autoRefreshToggle.checked;
 
       function setActiveMetric(metric) {
         currentMetric = metric;
         metricButtons.forEach((button) => {
           const isActive = button.dataset.metric === metric;
-        button.classList.toggle("bg-aurora", isActive);
-        button.classList.toggle("text-white", isActive);
-        button.classList.toggle("shadow-lg", isActive);
-        button.classList.toggle("shadow-aurora/30", isActive);
-        button.classList.toggle("shadow-none", !isActive);
-        button.classList.toggle("bg-transparent", !isActive);
-        button.classList.toggle("text-slate-300", !isActive);
+          button.classList.toggle("bg-aurora", isActive);
+          button.classList.toggle("text-white", isActive);
+          button.classList.toggle("shadow-lg", isActive);
+          button.classList.toggle("shadow-aurora/30", isActive);
+          button.classList.toggle("shadow-none", !isActive);
+          button.classList.toggle("bg-transparent", !isActive);
+          button.classList.toggle("text-slate-300", !isActive);
         });
         if (lastSnapshot) {
           renderChart(lastSnapshot, currentMetric);
@@ -245,6 +275,7 @@
         const delta = Date.now() - ms;
         if (delta < 0) return "Just now";
         const seconds = Math.floor(delta / 1000);
+        if (seconds <= 0) return "Just now";
         if (seconds < 60) return `${seconds}s ago`;
         const minutes = Math.floor(seconds / 60);
         if (minutes < 60) return `${minutes}m ago`;
@@ -269,6 +300,86 @@
         if (lag === 0) return "In sync";
         if (lag === 1) return "1 slot";
         return `${lag} slots`;
+      }
+
+      function showError(message) {
+        if (!message) return;
+        errorBanner.textContent = message;
+        errorBanner.classList.remove("hidden");
+      }
+
+      function clearError() {
+        if (!errorBanner.classList.contains("hidden")) {
+          errorBanner.classList.add("hidden");
+        }
+        errorBanner.textContent = "";
+      }
+
+      function clearAutoRefreshTimers() {
+        if (autoRefreshTimeoutId != null) {
+          clearTimeout(autoRefreshTimeoutId);
+          autoRefreshTimeoutId = null;
+        }
+        if (autoRefreshCountdownId != null) {
+          clearInterval(autoRefreshCountdownId);
+          autoRefreshCountdownId = null;
+        }
+      }
+
+      function updateAutoRefreshStatus(overrideText) {
+        if (overrideText) {
+          autoRefreshStatusEl.textContent = overrideText;
+          return;
+        }
+        if (!autoRefreshEnabled) {
+          autoRefreshStatusEl.textContent = "Paused";
+          return;
+        }
+        if (refreshButton.disabled) {
+          autoRefreshStatusEl.textContent = "Refreshing...";
+          return;
+        }
+        if (!nextRefreshAt) {
+          autoRefreshStatusEl.textContent = "Waiting...";
+          return;
+        }
+        const remainingMs = nextRefreshAt - Date.now();
+        if (remainingMs <= 0) {
+          autoRefreshStatusEl.textContent = "Now";
+          return;
+        }
+        const seconds = Math.ceil(remainingMs / 1000);
+        autoRefreshStatusEl.textContent = `Next in ${seconds}s`;
+      }
+
+      function queueAutoRefresh() {
+        clearAutoRefreshTimers();
+        if (!autoRefreshEnabled) {
+          nextRefreshAt = null;
+          updateAutoRefreshStatus();
+          return;
+        }
+        nextRefreshAt = Date.now() + AUTO_REFRESH_INTERVAL_MS;
+        updateAutoRefreshStatus();
+        autoRefreshCountdownId = setInterval(() => {
+          updateAutoRefreshStatus();
+        }, 1000);
+        autoRefreshTimeoutId = setTimeout(() => {
+          if (!autoRefreshEnabled) {
+            return;
+          }
+          if (refreshButton.disabled) {
+            queueAutoRefresh();
+            return;
+          }
+          refresh().finally(() => {
+            if (autoRefreshEnabled) {
+              queueAutoRefresh();
+            } else {
+              updateAutoRefreshStatus();
+            }
+          });
+        }, AUTO_REFRESH_INTERVAL_MS);
       }
 
       function updateStats(snapshot) {
@@ -461,8 +572,10 @@
       }
 
       async function refresh() {
+        clearError();
         refreshButton.disabled = true;
         refreshButton.classList.add("opacity-65");
+        updateAutoRefreshStatus("Refreshing...");
 
         try {
           const snapshot = await fetchSnapshot();
@@ -472,17 +585,46 @@
           renderProviders(snapshot);
         } catch (err) {
           console.error(err);
+          showError(err instanceof Error ? err.message : "Failed to load metrics snapshot.");
         } finally {
           refreshButton.disabled = false;
           refreshButton.classList.remove("opacity-65");
+          updateAutoRefreshStatus();
         }
       }
 
-      refreshButton.addEventListener("click", () => refresh());
+      refreshButton.addEventListener("click", () => {
+        clearAutoRefreshTimers();
+        refresh().finally(() => {
+          if (autoRefreshEnabled) {
+            queueAutoRefresh();
+          } else {
+            updateAutoRefreshStatus();
+          }
+        });
+      });
+
+      autoRefreshToggle.addEventListener("change", () => {
+        autoRefreshEnabled = autoRefreshToggle.checked;
+        if (autoRefreshEnabled) {
+          queueAutoRefresh();
+        } else {
+          clearAutoRefreshTimers();
+          nextRefreshAt = null;
+          updateAutoRefreshStatus();
+        }
+      });
 
       // Initialize defaults
       setActiveMetric("latency");
-      refresh();
+      updateAutoRefreshStatus();
+      refresh().finally(() => {
+        if (autoRefreshEnabled) {
+          queueAutoRefresh();
+        } else {
+          updateAutoRefreshStatus();
+        }
+      });
     </script>
   </body>
 </html>
