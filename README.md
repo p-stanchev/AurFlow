@@ -1,5 +1,9 @@
 # Open RPC Load Balancer (ORLB)
 
+<p align="center">
+  <img src="static/aurflow.png" alt="AurFlow logo" width="200" />
+</p>
+
 ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across multiple upstream RPC providers. It continuously probes each provider, scores them on latency and error rate, retries idempotent calls once, and exposes live Prometheus metrics plus a web dashboard. The goal of this MVP is to prove dependable routing with public RPCs in a single-container deploy.
 
 ## Core Capabilities
@@ -10,6 +14,7 @@ ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across 
 - **Quarantine & backoff** - providers with sustained failures are sidelined with exponential cooldown until probes succeed.
 - **Freshness scoring** - slot-aware penalties keep traffic on the highest-commitment providers.
 - **Commitment-aware routing** - inspects JSON-RPC commitment hints and prefers providers whose slot height satisfies processed/confirmed/finalized requirements.
+- **Tier-aware weighting** - tag providers (paid/public/foundation, etc.) and boost or de-prioritise traffic with configurable multipliers.
 - **Adaptive hedging** - optional parallel requests race a backup provider when the primary stalls.
 - **Observability** - `/metrics` (Prometheus text) and `/metrics.json` plus `/dashboard` (Chart.js) showing live scores.
 - **Doctor CLI** - `orlb doctor` lints the registry, validates headers, and probes each upstream before you deploy.
@@ -70,18 +75,24 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_OTEL_EXPORTER` | `none` | OpenTelemetry exporter (`none`, `stdout`, or `otlp_http`) |
 | `ORLB_OTEL_ENDPOINT` | unset | OTLP endpoint when `ORLB_OTEL_EXPORTER=otlp_http` (e.g. `http://collector:4318`) |
 | `ORLB_OTEL_SERVICE_NAME` | `orlb` | Service name attribute attached to emitted spans |
+| `ORLB_TAG_WEIGHTS` | unset | Optional comma-separated multipliers per tag (e.g. `paid=2.0,public=0.6`) |
 
 `providers.json` format:
 ```json
 [
-  {"name": "Solana Foundation", "url": "https://api.mainnet-beta.solana.com", "weight": 1},
-  {"name": "PublicNode", "url": "https://solana-rpc.publicnode.com", "weight": 1},
-  {"name": "Alchemy (demo)", "url": "https://solana-mainnet.g.alchemy.com/v2/demo", "weight": 1},
-  {"name": "QuikNode (docs demo)", "url": "https://docs-demo.solana-mainnet.quiknode.pro", "weight": 1},
-  {"name": "SolanaTracker", "url": "https://rpc.solanatracker.io/public", "weight": 1}
+  {"name": "Solana Foundation", "url": "https://api.mainnet-beta.solana.com", "weight": 1, "tags": ["foundation", "paid"]},
+  {"name": "PublicNode", "url": "https://solana-rpc.publicnode.com", "weight": 1, "tags": ["public"]},
+  {"name": "Alchemy (demo)", "url": "https://solana-mainnet.g.alchemy.com/v2/demo", "weight": 1, "tags": ["paid"]},
+  {"name": "QuikNode (docs demo)", "url": "https://docs-demo.solana-mainnet.quiknode.pro", "weight": 1, "tags": ["paid"]},
+  {"name": "SolanaTracker", "url": "https://rpc.solanatracker.io/public", "weight": 1, "tags": ["public"]}
 ]
 ```
-Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`). Tune `weight` to bias traffic toward trusted paid tiers while still keeping resilient public RPC coverage.
+Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`). Tune `weight` and `tags` to bias traffic toward trusted paid tiers while still keeping resilient public RPC coverage.
+
+### Provider tagging & policies
+- Add a `tags` array to any provider in `providers.json` (tags are normalised to lowercase and duplicates removed).
+- Set `ORLB_TAG_WEIGHTS` to boost or damp traffic per tag. Example: `ORLB_TAG_WEIGHTS=paid=2.0,public=0.6` doubles effective weight for tagged paid providers and trims public ones to 60%. When a provider has multiple matching tags, the highest multiplier wins.
+- Effective weights (base × multiplier) surface in `metrics.json` (`effective_weight`, `tag_multiplier`) and on the dashboard so you can audit routing decisions.
 
 ### Diagnostics
 Run `cargo run -- doctor` (or the compiled binary with `orlb doctor`) to lint the provider registry and perform live reachability probes. The command flags duplicate names/URLs, invalid headers, zero weights, stale commitment (providers lagging more than `ORLB_SLOT_LAG_ALERT_SLOTS` slots), and transport/HTTP failures. A non-zero exit status indicates issues that should be fixed before deploying.
@@ -183,7 +194,7 @@ Set secrets for any private provider headers or API keys. The service is statele
 - API key rate limiting and auth.
 - Edge deployments across regions, optional caching (e.g., `getLatestBlockhash`).
 - Adaptive parallelism/hedging to shave p99 latency when a provider stalls.
-- Provider tagging/policies to express traffic weights by tier (paid vs public pools).
+- ~~Provider tagging/policies to express traffic weights by tier (paid vs public pools).~~ ✅
 - SLO-aware alerting that turns Prometheus metrics into burn-rate signals.
 - Optional secret-manager (Vault/GCP/AWS) integration for provider API keys.
 

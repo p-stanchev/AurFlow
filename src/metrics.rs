@@ -79,6 +79,7 @@ pub struct Metrics {
     slo_window_errors: GaugeVec,
     slo_provider_availability: GaugeVec,
     slo_provider_error_rate: GaugeVec,
+    tag_weights: HashMap<String, f64>,
     prometheus_registry: PromRegistry,
     state: Arc<RwLock<HashMap<String, ProviderState>>>,
     round_robin_cursor: Arc<AtomicUsize>,
@@ -137,6 +138,9 @@ pub struct DashboardProvider {
     pub commitments: Vec<DashboardCommitmentSlot>,
     pub last_updated_ms: u64,
     pub weight: u16,
+    pub effective_weight: f64,
+    pub tag_multiplier: f64,
+    pub tags: Vec<String>,
     pub score: f64,
     pub raw_score: f64,
     pub quarantined: bool,
@@ -294,6 +298,7 @@ impl Metrics {
             slo_window_errors,
             slo_provider_availability,
             slo_provider_error_rate,
+            tag_weights: config.tag_weights.clone(),
             prometheus_registry,
             state: Arc::new(RwLock::new(initial_state)),
             round_robin_cursor: Arc::new(AtomicUsize::new(0)),
@@ -554,8 +559,8 @@ impl Metrics {
                     ),
                 };
 
-                let weight = provider.weight.max(1) as f64;
-                let weighted_score = raw_score / weight;
+                let effective_weight = self.effective_weight(provider);
+                let weighted_score = raw_score / effective_weight;
                 let quarantined = matches!(quarantined_until, Some(deadline) if deadline > now);
                 let effective_healthy = healthy && !quarantined;
 
@@ -662,7 +667,9 @@ impl Metrics {
                 let slot_penalty = compute_slot_penalty(slots_behind, self.slot_lag_penalty_ms);
                 let total_errors = request_errors.saturating_add(probe_errors);
                 let raw_score = compute_score(ema, failures, total_errors, slot_penalty);
-                let weighted_score = raw_score / provider.weight.max(1) as f64;
+                let tag_multiplier = self.tag_multiplier(provider);
+                let effective_weight = self.effective_weight(provider);
+                let weighted_score = raw_score / effective_weight;
                 let quarantined = matches!(quarantined_until, Some(deadline) if deadline > now);
                 let healthy_display = healthy && !quarantined;
 
@@ -701,6 +708,9 @@ impl Metrics {
                     commitments,
                     last_updated_ms: system_time_to_millis(updated),
                     weight: provider.weight,
+                    effective_weight,
+                    tag_multiplier,
+                    tags: provider.tags.clone(),
                     score: weighted_score,
                     raw_score,
                     quarantined,
@@ -736,6 +746,21 @@ impl Metrics {
 
     pub fn record_hedge(&self, reason: &str) {
         self.hedges.with_label_values(&[reason]).inc();
+    }
+
+    fn tag_multiplier(&self, provider: &Provider) -> f64 {
+        let mut multiplier = 1.0f64;
+        for tag in &provider.tags {
+            if let Some(weight) = self.tag_weights.get(tag) {
+                multiplier = multiplier.max(*weight);
+            }
+        }
+        multiplier
+    }
+
+    fn effective_weight(&self, provider: &Provider) -> f64 {
+        let base = provider.weight.max(1) as f64;
+        base * self.tag_multiplier(provider)
     }
 }
 
@@ -988,6 +1013,7 @@ mod tests {
             url: url.to_string(),
             weight: 1,
             headers: None,
+            tags: Vec::new(),
         }
     }
 
@@ -1008,6 +1034,7 @@ mod tests {
                 exporter: OtelExporter::None,
                 service_name: "orlb-test".into(),
             },
+            tag_weights: HashMap::new(),
         }
     }
 
@@ -1090,5 +1117,63 @@ mod tests {
         assert_eq!(card.probe_success, 1);
         assert_eq!(card.probe_errors, 1);
         assert_eq!(card.commitments.len(), Commitment::ALL.len());
+        assert!(card.tags.is_empty());
+        assert_eq!(card.tag_multiplier, 1.0);
+        assert_eq!(card.effective_weight, card.weight as f64);
+    }
+
+    #[tokio::test]
+    async fn tag_multiplier_adjusts_effective_weight() {
+        let mut config = test_config();
+        config.tag_weights.insert("paid".into(), 2.5);
+        config.tag_weights.insert("premium".into(), 1.4);
+
+        let registry = Registry::from_providers(vec![
+            Provider {
+                name: "Paid".into(),
+                url: "https://paid.example.com".into(),
+                weight: 1,
+                headers: None,
+                tags: vec!["paid".into()],
+            },
+            Provider {
+                name: "Public".into(),
+                url: "https://public.example.com".into(),
+                weight: 1,
+                headers: None,
+                tags: vec!["public".into()],
+            },
+        ])
+        .unwrap();
+        let metrics = Metrics::new(registry, &config).unwrap();
+
+        let slots = CommitmentSlots::from_slot(Commitment::Finalized, Some(1_500));
+        metrics
+            .record_health_success("Paid", Duration::from_millis(40), slots)
+            .await;
+        metrics
+            .record_health_success(
+                "Public",
+                Duration::from_millis(40),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(1_500)),
+            )
+            .await;
+
+        let snapshot = metrics.dashboard_snapshot().await;
+        let paid = snapshot
+            .providers
+            .iter()
+            .find(|p| p.name == "Paid")
+            .expect("paid provider present");
+        assert_eq!(paid.tag_multiplier, 2.5);
+        assert!((paid.effective_weight - 2.5).abs() < f64::EPSILON);
+
+        let public = snapshot
+            .providers
+            .iter()
+            .find(|p| p.name == "Public")
+            .expect("public provider present");
+        assert_eq!(public.tag_multiplier, 1.0);
+        assert_eq!(public.effective_weight, public.weight as f64);
     }
 }

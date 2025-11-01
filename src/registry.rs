@@ -13,6 +13,8 @@ pub struct Provider {
     pub weight: u16,
     #[serde(default)]
     pub headers: Option<Vec<Header>>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -31,12 +33,14 @@ impl Registry {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("failed to read provider registry from {}", path.display()))?;
 
-        let providers: Vec<Provider> = serde_json::from_str(&raw).with_context(|| {
+        let mut providers: Vec<Provider> = serde_json::from_str(&raw).with_context(|| {
             format!(
                 "failed to parse provider registry JSON from {}",
                 path.display()
             )
         })?;
+
+        normalise_providers(&mut providers);
 
         if providers.is_empty() {
             bail!("provider registry is empty");
@@ -52,6 +56,8 @@ impl Registry {
         if providers.is_empty() {
             bail!("provider registry cannot be empty");
         }
+        let mut providers = providers;
+        normalise_providers(&mut providers);
         Ok(Self {
             providers: Arc::new(providers),
         })
@@ -68,4 +74,21 @@ impl Registry {
 
 fn default_weight() -> u16 {
     1
+}
+
+fn normalise_providers(providers: &mut [Provider]) {
+    for provider in providers.iter_mut() {
+        if let Some(headers) = provider.headers.as_mut() {
+            headers.retain(|header| !header.name.trim().is_empty());
+        }
+        let mut tags: Vec<String> = provider
+            .tags
+            .iter()
+            .map(|tag| tag.trim().to_ascii_lowercase())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        tags.sort();
+        tags.dedup();
+        provider.tags = tags;
+    }
 }

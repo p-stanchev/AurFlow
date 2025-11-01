@@ -685,6 +685,7 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
@@ -715,6 +716,7 @@ mod tests {
                 exporter: OtelExporter::None,
                 service_name: "orlb-test".into(),
             },
+            tag_weights: HashMap::new(),
         }
     }
 
@@ -761,6 +763,7 @@ mod tests {
             url: server.uri(),
             weight: 1,
             headers: None,
+            tags: Vec::new(),
         };
 
         let state = build_state(vec![provider.clone()]).await;
@@ -816,12 +819,14 @@ mod tests {
                 url: primary.uri(),
                 weight: 1,
                 headers: None,
+                tags: Vec::new(),
             },
             Provider {
                 name: "Secondary".into(),
                 url: secondary.uri(),
                 weight: 1,
                 headers: None,
+                tags: Vec::new(),
             },
         ];
 
@@ -886,12 +891,14 @@ mod tests {
                 url: primary.uri(),
                 weight: 1,
                 headers: None,
+                tags: Vec::new(),
             },
             Provider {
                 name: "Fast".into(),
                 url: secondary.uri(),
                 weight: 1,
                 headers: None,
+                tags: Vec::new(),
             },
         ];
 
@@ -948,6 +955,7 @@ mod tests {
             url: server.uri(),
             weight: 1,
             headers: None,
+            tags: Vec::new(),
         };
 
         let state = build_state(vec![provider]).await;

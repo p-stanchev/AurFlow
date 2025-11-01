@@ -2,31 +2,37 @@
   {
     "name": "Solana Foundation (mainnet)",
     "url": "https://api.mainnet-beta.solana.com",
-    "weight": 1
+    "weight": 1,
+    "tags": ["foundation", "paid"]
   },
   {
     "name": "Solana Foundation (devnet)",
     "url": "https://api.devnet.solana.com",
-    "weight": 1
+    "weight": 1,
+    "tags": ["foundation", "public"]
   },
   {
     "name": "Solana Foundation (testnet)",
     "url": "https://api.testnet.solana.com",
-    "weight": 1
+    "weight": 1,
+    "tags": ["foundation", "public"]
   },
   {
     "name": "PublicNode",
     "url": "https://solana-rpc.publicnode.com",
-    "weight": 1
+    "weight": 1,
+    "tags": ["public"]
   },
   {
     "name": "dRPC",
     "url": "https://solana.drpc.org/",
-    "weight": 1
+    "weight": 1,
+    "tags": ["paid"]
   },
   {
     "name": "SolanaTracker",
     "url": "https://rpc.solanatracker.io/public",
-    "weight": 1
+    "weight": 1,
+    "tags": ["public"]
   }
 ]

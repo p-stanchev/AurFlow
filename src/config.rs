@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -20,6 +21,7 @@ pub struct Config {
     pub hedge_delay: Duration,
     pub slo_target: f64,
     pub otel: OtelConfig,
+    pub tag_weights: HashMap<String, f64>,
 }
 
 /// OpenTelemetry configuration derived from environment variables.
@@ -90,6 +92,8 @@ impl Config {
             }
         });
         let otel_exporter = parse_otel_exporter(&otel_exporter_raw, otel_endpoint)?;
+        let tag_weights_raw = env::var("ORLB_TAG_WEIGHTS").unwrap_or_default();
+        let tag_weights = parse_tag_weights(tag_weights_raw.trim())?;
 
         Ok(Self {
             listen_addr,
@@ -107,6 +111,7 @@ impl Config {
                 exporter: otel_exporter,
                 service_name: otel_service_name,
             },
+            tag_weights,
         })
     }
 }
@@ -201,4 +206,39 @@ where
         Some(value) => parser(&value),
         None => parser(default),
     }
+}
+
+fn parse_tag_weights(input: &str) -> Result<HashMap<String, f64>> {
+    let mut weights = HashMap::new();
+    if input.trim().is_empty() {
+        return Ok(weights);
+    }
+
+    for part in input.split(',') {
+        let trimmed = part.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut pieces = trimmed.splitn(2, '=');
+        let tag = pieces
+            .next()
+            .map(|tag| tag.trim().to_ascii_lowercase())
+            .filter(|tag| !tag.is_empty())
+            .ok_or_else(|| anyhow!("invalid tag weight segment `{trimmed}`"))?;
+        let value = pieces
+            .next()
+            .ok_or_else(|| anyhow!("missing value for tag `{tag}`"))?
+            .trim();
+        let multiplier: f64 = value
+            .parse()
+            .with_context(|| format!("invalid weight `{value}` for tag `{tag}`"))?;
+        if multiplier <= 0.0 {
+            return Err(anyhow!(
+                "tag weight for `{tag}` must be greater than zero (got {multiplier})"
+            ));
+        }
+        weights.insert(tag, multiplier);
+    }
+
+    Ok(weights)
 }

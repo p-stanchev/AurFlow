@@ -42,7 +42,8 @@
         ></div>
         <header class="rounded-3xl border border-white/10 bg-white/5 px-8 py-10 shadow-xl shadow-aurora/5 backdrop-blur">
           <div class="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
-            <div>
+            <div class="flex items-center gap-4">
+              <img src="/static/aurflow.png" alt="AurFlow logo" class="h-12 w-12 rounded-full border border-white/20 bg-white/80" />
               <p class="text-sm uppercase tracking-[0.3em] text-slate-400">Open RPC Load Balancer</p>
               <h1 class="mt-2 text-3xl font-semibold md:text-4xl">Provider Command Console</h1>
               <p class="mt-3 max-w-xl text-sm text-slate-400">
@@ -188,6 +189,14 @@
             <dd class="font-medium"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
+            <dt class="text-slate-400">Effective Weight</dt>
+            <dd class="font-medium"></dd>
+          </div>
+          <div class="flex items-center justify-between gap-3">
+            <dt class="text-slate-400">Tags</dt>
+            <dd class="font-medium"></dd>
+          </div>
+          <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Last Slot</dt>
             <dd class="font-medium"></dd>
           </div>
@@ -267,6 +276,17 @@
 
       function formatScore(value) {
         return Number.isFinite(value) ? value.toFixed(2) : "—";
+      }
+
+      function formatEffectiveWeight(base, multiplier, effective) {
+        const safeBase = Number(base) || 1;
+        const safeMultiplier = Number(multiplier) || 1;
+        const safeEffective = Number.isFinite(effective) ? effective : safeBase * safeMultiplier;
+        const roundedEffective = safeEffective.toFixed(2);
+        if (Math.abs(safeMultiplier - 1) < 1e-6) {
+          return `${roundedEffective} (base ${safeBase})`;
+        }
+        return `${roundedEffective} (base ${safeBase} × ${safeMultiplier.toFixed(2)})`;
       }
 
       function formatCount(value) {
@@ -585,7 +605,10 @@
           } else {
             relativeScore = "Warm standby";
           }
-          subtitleEl.textContent = relativeScore;
+          const tagList = Array.isArray(provider.tags) && provider.tags.length
+            ? provider.tags.join(", ")
+            : "";
+          subtitleEl.textContent = tagList ? `${relativeScore} • ${tagList}` : relativeScore;
 
           const statusBadge = card.querySelector("span.flex.items-center");
           const badgeDot = statusBadge.querySelector("span");
@@ -613,12 +636,22 @@
           details[2].textContent = formatRequestCounts(provider.success, provider.errors);
           details[3].textContent = formatProbeCounts(provider.probe_success, provider.probe_errors);
           details[4].textContent = formatScore(provider.score);
-          details[5].textContent = provider.last_slot ?? "--";
-          details[6].textContent = formatSlotLag(slotsBehind);
-          details[7].textContent = relativeTimeFrom(provider.last_updated_ms);
+          details[5].textContent = formatEffectiveWeight(
+            provider.weight,
+            provider.tag_multiplier ?? 1,
+            provider.effective_weight ?? provider.weight
+          );
+          details[6].textContent = tagList || "—";
+          details[7].textContent = provider.last_slot ?? "--";
+          details[8].textContent = formatSlotLag(slotsBehind);
+          details[9].textContent = relativeTimeFrom(provider.last_updated_ms);
 
           const footerSpans = card.querySelectorAll(".mt-6 span");
-          footerSpans[0].textContent = `Weight ${provider.weight}`;
+          const multiplierText =
+            provider.tag_multiplier && Math.abs(provider.tag_multiplier - 1) > 1e-6
+              ? `Weight ${provider.weight} × ${provider.tag_multiplier.toFixed(2)}`
+              : `Weight ${provider.weight}`;
+          footerSpans[0].textContent = multiplierText;
           if (provider.quarantined) {
             const releaseWindow = relativeTimeUntil(provider.quarantined_until_ms);
             footerSpans[1].textContent = releaseWindow
