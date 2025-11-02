@@ -209,5 +209,6 @@ Set secrets for any private provider headers or API keys. The service is statele
 - Optional secret-manager (Vault/GCP/AWS) integration for provider API keys.
 
 ## License
-Apache 2.0 (or adapt as needed). Feel free to fork and extend for grant demos or production load-balancing.
+Apache 2.0 (or adapt as needed). Feel free to fork and extend for demos or production load-balancing.
+
 
