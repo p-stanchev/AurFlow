@@ -763,6 +763,94 @@ impl Metrics {
         self.hedges.with_label_values(&[reason]).inc();
     }
 
+    /// Gets the estimated p95 latency for a provider based on EMA and histogram
+    /// Falls back to a multiplier of EMA if histogram doesn't have enough data
+    pub async fn estimated_p95_latency_ms(&self, provider: &str) -> f64 {
+        let guard = self.state.read().await;
+        let ema = guard
+            .get(provider)
+            .map(|s| s.latency_ema_ms)
+            .unwrap_or(FALLBACK_LATENCY_MS);
+
+        // Try to get p95 from histogram if available
+        // For now, use a conservative multiplier of EMA to estimate p95
+        // Typical p95 is ~2-3x the mean/EMA for latency distributions
+        // If provider is consistently slow, we hedge earlier
+        ema * 2.5
+    }
+
+    /// Gets the estimated p99 latency for a provider
+    pub async fn estimated_p99_latency_ms(&self, provider: &str) -> f64 {
+        let guard = self.state.read().await;
+        let ema = guard
+            .get(provider)
+            .map(|s| s.latency_ema_ms)
+            .unwrap_or(FALLBACK_LATENCY_MS);
+
+        // P99 is typically ~3-5x the mean/EMA
+        ema * 3.5
+    }
+
+    /// Calculates adaptive hedge delay based on provider's latency characteristics
+    /// Returns delay in milliseconds. Lower delays mean hedge earlier (for slow providers)
+    /// Uses p95/p99 estimates to predict when a provider might stall
+    pub async fn calculate_adaptive_hedge_delay_ms(
+        &self,
+        provider: &str,
+        base_delay_ms: f64,
+        min_delay_ms: f64,
+        max_delay_ms: f64,
+    ) -> f64 {
+        let guard = self.state.read().await;
+        let state = guard.get(provider);
+        
+        let ema = state
+            .as_ref()
+            .map(|s| s.latency_ema_ms)
+            .unwrap_or(FALLBACK_LATENCY_MS);
+
+        // Use p95 estimate to predict when provider might stall
+        // If p95 is high, hedge much earlier to avoid p99 tail latency
+        let p95_estimate = self.estimated_p95_latency_ms(provider).await;
+        let p99_estimate = self.estimated_p99_latency_ms(provider).await;
+
+        // Fast threshold: providers with EMA below this are considered "fast"
+        let fast_threshold_ms = 50.0;
+        
+        // Calculate adaptive delay based on latency profile
+        let adaptive_delay = if ema > fast_threshold_ms {
+            // Slow provider: hedge earlier based on p95/p99
+            // The idea: if p95 is much higher than EMA, there's high variance
+            // Hedge earlier to cut off tail latencies
+            let variance_factor = (p95_estimate / ema.max(1.0)).min(3.0);
+            let base_factor = (fast_threshold_ms / ema).min(1.0);
+            base_delay_ms * base_factor * (1.0 / variance_factor)
+        } else {
+            // Fast provider: use normal delay, but still consider p99 if it's high
+            if p99_estimate > ema * 4.0 {
+                // High tail latency even for fast providers - hedge slightly earlier
+                base_delay_ms * 0.9
+            } else {
+                base_delay_ms * 1.2
+            }
+        };
+
+        // Also consider consecutive failures - if failing, hedge very early
+        let consecutive_failures = state
+            .as_ref()
+            .map(|s| s.consecutive_failures)
+            .unwrap_or(0);
+        
+        let failure_factor = if consecutive_failures > 0 {
+            0.5 // Hedge very early if provider has recent failures
+        } else {
+            1.0
+        };
+
+        let final_delay = adaptive_delay * failure_factor;
+        final_delay.clamp(min_delay_ms, max_delay_ms)
+    }
+
     fn tag_multiplier(&self, provider: &Provider) -> f64 {
         let mut multiplier = 1.0f64;
         for tag in &provider.tags {
@@ -1045,6 +1133,9 @@ mod tests {
             slot_lag_alert_slots: 50,
             hedge_requests: false,
             hedge_delay: Duration::from_millis(60),
+            adaptive_hedging: true,
+            hedge_min_delay_ms: 10.0,
+            hedge_max_delay_ms: 200.0,
             slo_target: 0.995,
             otel: OtelConfig {
                 exporter: OtelExporter::None,

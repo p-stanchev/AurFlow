@@ -219,6 +219,47 @@
     </template>
 
     <script>
+      /**
+       * @typedef {Object} DashboardProvider
+       * @property {string} name
+       * @property {number|null} latency
+       * @property {number} latency_ema
+       * @property {number} success
+       * @property {number} errors
+       * @property {number} probe_success
+       * @property {number} probe_errors
+       * @property {boolean} healthy
+       * @property {number|null} last_slot
+       * @property {number|null} slots_behind
+       * @property {number} weight
+       * @property {number} effective_weight
+       * @property {number} tag_multiplier
+       * @property {string[]} tags
+       * @property {number} score
+       * @property {boolean} quarantined
+       * @property {number|null} quarantined_until_ms
+       * @property {number} last_updated_ms
+       */
+
+      /**
+       * @typedef {Object} DashboardSnapshot
+       * @property {DashboardProvider[]} providers
+       * @property {number} updated_at
+       * @property {number|null} best_slot
+       */
+
+      // Constants
+      const AUTO_REFRESH_INTERVAL_MS = 5000;
+      const COUNTDOWN_UPDATE_INTERVAL_MS = 1000;
+      const MAX_RETRY_ATTEMPTS = 3;
+      const RETRY_DELAY_MS = 1000;
+      const SLOT_LAG_STALE_THRESHOLD = 64;
+      const SLOT_LAG_WATCH_THRESHOLD = 16;
+      const SCORE_PREFERRED_THRESHOLD = 120;
+      const SCORE_BALANCED_THRESHOLD = 200;
+      const METRICS_ENDPOINT = "/metrics.json";
+
+      // DOM References
       const providerCardsContainer = document.getElementById("providerCards");
       const providerCardTemplate = document.getElementById("providerCardTemplate");
       const providerCountEl = document.getElementById("providerCount");
@@ -231,23 +272,29 @@
       const autoRefreshToggle = document.getElementById("autoRefreshToggle");
       const autoRefreshStatusEl = document.getElementById("autoRefreshStatus");
       const errorBanner = document.getElementById("errorBanner");
-
       const metricToggle = document.getElementById("metricToggle");
       const metricButtons = Array.from(metricToggle.querySelectorAll(".metric-toggle"));
-      const AUTO_REFRESH_INTERVAL_MS = 5000;
+
+      // State
       let latencyChart = null;
       let currentMetric = "latency";
       let lastSnapshot = null;
-      let autoRefreshEnabled = true;
+      let autoRefreshEnabled = autoRefreshToggle.checked;
       let autoRefreshTimeoutId = null;
       let autoRefreshCountdownId = null;
       let nextRefreshAt = null;
-      autoRefreshEnabled = autoRefreshToggle.checked;
+      let isOnline = navigator.onLine;
+      let retryCount = 0;
 
+      /**
+       * Sets the active metric and updates UI accordingly
+       * @param {string} metric - The metric to activate ('latency' | 'latency_ema' | 'score')
+       */
       function setActiveMetric(metric) {
         currentMetric = metric;
         metricButtons.forEach((button) => {
           const isActive = button.dataset.metric === metric;
+          button.setAttribute("aria-pressed", isActive.toString());
           button.classList.toggle("bg-aurora", isActive);
           button.classList.toggle("text-white", isActive);
           button.classList.toggle("shadow-lg", isActive);
@@ -261,12 +308,25 @@
         }
       }
 
-      metricButtons.forEach((button) => {
-        button.addEventListener("click", () => {
+      // Event delegation for metric buttons
+      metricToggle.addEventListener("click", (e) => {
+        const button = e.target.closest(".metric-toggle");
+        if (button && button.dataset.metric) {
           setActiveMetric(button.dataset.metric);
-        });
+        }
       });
 
+      // Initialize metric button accessibility
+      metricButtons.forEach((button) => {
+        button.setAttribute("role", "button");
+        button.setAttribute("aria-pressed", "false");
+      });
+
+      /**
+       * Formats a millisecond value for display
+       * @param {number|null|undefined} value - The value in milliseconds
+       * @returns {string} Formatted string or "n/a"
+       */
       function formatMillis(value) {
         if (value == null || Number.isNaN(value)) {
           return "n/a";
@@ -274,6 +334,11 @@
         return `${value.toFixed(1)} ms`;
       }
 
+      /**
+       * Formats a score value for display
+       * @param {number} value - The score value
+       * @returns {string} Formatted score or em dash
+       */
       function formatScore(value) {
         return Number.isFinite(value) ? value.toFixed(2) : "—";
       }
@@ -331,6 +396,11 @@
         return new Date(ms).toLocaleTimeString();
       }
 
+      /**
+       * Formats relative time from a timestamp
+       * @param {number|null} ms - Timestamp in milliseconds
+       * @returns {string} Relative time string
+       */
       function relativeTimeFrom(ms) {
         if (!ms) return "Awaiting data";
         const delta = Date.now() - ms;
@@ -344,6 +414,11 @@
         return `${hours}h ago`;
       }
 
+      /**
+       * Formats relative time until a timestamp
+       * @param {number|null} ms - Future timestamp in milliseconds
+       * @returns {string} Relative time string
+       */
       function relativeTimeUntil(ms) {
         if (!ms) return "";
         const delta = ms - Date.now();
@@ -356,6 +431,11 @@
         return `${hours}h`;
       }
 
+      /**
+       * Formats slot lag for display
+       * @param {number|null} lag - Number of slots behind
+       * @returns {string} Formatted lag string
+       */
       function formatSlotLag(lag) {
         if (lag == null) return "--";
         if (lag === 0) return "In sync";
@@ -363,19 +443,31 @@
         return `${lag} slots`;
       }
 
+      /**
+       * Displays an error message in the banner
+       * @param {string} message - Error message to display
+       */
       function showError(message) {
         if (!message) return;
         errorBanner.textContent = message;
         errorBanner.classList.remove("hidden");
+        errorBanner.setAttribute("aria-live", "assertive");
       }
 
+      /**
+       * Clears the error banner
+       */
       function clearError() {
         if (!errorBanner.classList.contains("hidden")) {
           errorBanner.classList.add("hidden");
         }
         errorBanner.textContent = "";
+        errorBanner.removeAttribute("aria-live");
       }
 
+      /**
+       * Clears all auto-refresh timers
+       */
       function clearAutoRefreshTimers() {
         if (autoRefreshTimeoutId != null) {
           clearTimeout(autoRefreshTimeoutId);
@@ -387,6 +479,10 @@
         }
       }
 
+      /**
+       * Updates the auto-refresh status display
+       * @param {string|null} overrideText - Optional override text
+       */
       function updateAutoRefreshStatus(overrideText) {
         if (overrideText) {
           autoRefreshStatusEl.textContent = overrideText;
@@ -398,6 +494,10 @@
         }
         if (refreshButton.disabled) {
           autoRefreshStatusEl.textContent = "Refreshing...";
+          return;
+        }
+        if (!isOnline) {
+          autoRefreshStatusEl.textContent = "Offline";
           return;
         }
         if (!nextRefreshAt) {
@@ -413,9 +513,12 @@
         autoRefreshStatusEl.textContent = `Next in ${seconds}s`;
       }
 
+      /**
+       * Queues the next auto-refresh
+       */
       function queueAutoRefresh() {
         clearAutoRefreshTimers();
-        if (!autoRefreshEnabled) {
+        if (!autoRefreshEnabled || !isOnline) {
           nextRefreshAt = null;
           updateAutoRefreshStatus();
           return;
@@ -424,9 +527,9 @@
         updateAutoRefreshStatus();
         autoRefreshCountdownId = setInterval(() => {
           updateAutoRefreshStatus();
-        }, 1000);
+        }, COUNTDOWN_UPDATE_INTERVAL_MS);
         autoRefreshTimeoutId = setTimeout(() => {
-          if (!autoRefreshEnabled) {
+          if (!autoRefreshEnabled || !isOnline) {
             return;
           }
           if (refreshButton.disabled) {
@@ -434,7 +537,7 @@
             return;
           }
           refresh().finally(() => {
-            if (autoRefreshEnabled) {
+            if (autoRefreshEnabled && isOnline) {
               queueAutoRefresh();
             } else {
               updateAutoRefreshStatus();
@@ -443,82 +546,100 @@
         }, AUTO_REFRESH_INTERVAL_MS);
       }
 
+      /**
+       * Updates the statistics display with snapshot data
+       * @param {DashboardSnapshot} snapshot - The dashboard snapshot
+       */
       function updateStats(snapshot) {
         const providers = snapshot.providers;
         const healthy = providers.filter((p) => p.healthy);
         const standby = providers.filter((p) => !p.healthy && !p.quarantined);
         const quarantined = providers.filter((p) => p.quarantined);
+        
         providerCountEl.textContent = providers.length.toString();
         healthyCountEl.textContent = `${healthy.length} active, ${standby.length} standby, ${quarantined.length} quarantined`;
 
         const measured = providers.filter((p) => Number.isFinite(p.latency ?? p.latency_ema));
         const avgLatency =
-          measured.reduce((sum, p) => sum + (p.latency ?? p.latency_ema ?? 0), 0) /
-          (measured.length || 1);
+          measured.length > 0
+            ? measured.reduce((sum, p) => sum + (p.latency ?? p.latency_ema ?? 0), 0) / measured.length
+            : 0;
         avgLatencyEl.textContent = measured.length ? `${avgLatency.toFixed(1)} ms` : "n/a";
+        
         const bestSlot =
           typeof snapshot.best_slot === "number" && snapshot.best_slot > 0 ? snapshot.best_slot : null;
-        const totalRequestSuccess = providers.reduce(
-          (sum, p) => sum + (Number(p.success) || 0),
-          0
+        
+        // Calculate totals using a single pass
+        const totals = providers.reduce(
+          (acc, p) => {
+            acc.requestSuccess += Number(p.success) || 0;
+            acc.requestErrors += Number(p.errors) || 0;
+            acc.probeSuccess += Number(p.probe_success) || 0;
+            acc.probeErrors += Number(p.probe_errors) || 0;
+            return acc;
+          },
+          { requestSuccess: 0, requestErrors: 0, probeSuccess: 0, probeErrors: 0 }
         );
-        const totalRequestErrors = providers.reduce(
-          (sum, p) => sum + (Number(p.errors) || 0),
-          0
-        );
-        const totalProbeSuccess = providers.reduce(
-          (sum, p) => sum + (Number(p.probe_success) || 0),
-          0
-        );
-        const totalProbeErrors = providers.reduce(
-          (sum, p) => sum + (Number(p.probe_errors) || 0),
-          0
-        );
-        const requestTotal = totalRequestSuccess + totalRequestErrors;
+        
+        const requestTotal = totals.requestSuccess + totals.requestErrors;
         const trafficSummary =
           requestTotal > 0
-            ? `traffic ${formatCount(totalRequestSuccess)} / ${formatCount(totalRequestErrors)} (${formatPercent(
-                (totalRequestSuccess / requestTotal) * 100
+            ? `traffic ${formatCount(totals.requestSuccess)} / ${formatCount(totals.requestErrors)} (${formatPercent(
+                (totals.requestSuccess / requestTotal) * 100
               )}% ok)`
             : "traffic idle";
-        const probeTotal = totalProbeSuccess + totalProbeErrors;
+        
+        const probeTotal = totals.probeSuccess + totals.probeErrors;
         const probeSummary =
           probeTotal > 0
-            ? `probes ${formatCount(totalProbeSuccess)} / ${formatCount(totalProbeErrors)} (${formatPercent(
-                (totalProbeSuccess / probeTotal) * 100
+            ? `probes ${formatCount(totals.probeSuccess)} / ${formatCount(totals.probeErrors)} (${formatPercent(
+                (totals.probeSuccess / probeTotal) * 100
               )}% pass)`
             : "probes idle";
-        if (measured.length) {
-          const slotText = bestSlot != null ? `latest slot ${bestSlot}` : "awaiting slot data";
-          latencyDetailEl.textContent = `Across ${measured.length} providers reporting | ${slotText} | ${trafficSummary} | ${probeSummary}`;
-        } else {
-          const slotText = bestSlot != null ? `latest slot ${bestSlot}` : "awaiting slot data";
-          latencyDetailEl.textContent = `Waiting for latency samples | ${slotText} | ${trafficSummary} | ${probeSummary}`;
-        }
+        
+        const slotText = bestSlot != null ? `latest slot ${bestSlot}` : "awaiting slot data";
+        latencyDetailEl.textContent = measured.length
+          ? `Across ${measured.length} providers reporting | ${slotText} | ${trafficSummary} | ${probeSummary}`
+          : `Waiting for latency samples | ${slotText} | ${trafficSummary} | ${probeSummary}`;
 
         lastUpdatedEl.textContent = formatTimestamp(snapshot.updated_at);
         updatedAgoEl.textContent = relativeTimeFrom(snapshot.updated_at);
       }
 
+      /**
+       * Renders or updates the latency chart
+       * @param {DashboardSnapshot} snapshot - The dashboard snapshot
+       * @param {string} metricKey - The metric to display
+       */
       function renderChart(snapshot, metricKey = currentMetric) {
         const providers = snapshot.providers;
-        const labels = providers.map((p) => p.name);
-        const values = providers.map((p) => {
+        
+        // Single pass to compute all data
+        const chartData = providers.map((p) => {
           const metricValue =
             metricKey === "latency"
               ? p.latency ?? p.latency_ema
               : metricKey === "latency_ema"
               ? p.latency_ema
               : p.score;
-          return Number.isFinite(metricValue) ? metricValue : 0;
+          
+          let backgroundColor;
+          if (p.quarantined) {
+            backgroundColor = "rgba(248, 113, 113, 0.75)";
+          } else {
+            backgroundColor = p.healthy ? "rgba(99, 102, 241, 0.8)" : "rgba(249, 115, 22, 0.6)";
+          }
+          
+          return {
+            label: p.name,
+            value: Number.isFinite(metricValue) ? metricValue : 0,
+            color: backgroundColor,
+          };
         });
 
-        const backgroundColors = providers.map((p) => {
-          if (p.quarantined) {
-            return "rgba(248, 113, 113, 0.75)";
-          }
-          return p.healthy ? "rgba(99, 102, 241, 0.8)" : "rgba(249, 115, 22, 0.6)";
-        });
+        const labels = chartData.map((d) => d.label);
+        const values = chartData.map((d) => d.value);
+        const backgroundColors = chartData.map((d) => d.color);
 
         const datasetLabel =
           metricKey === "score"
@@ -545,10 +666,22 @@
             options: {
               responsive: true,
               maintainAspectRatio: false,
+              animation: {
+                duration: 300,
+              },
+              transitions: {
+                active: {
+                  animation: {
+                    duration: 0,
+                  },
+                },
+              },
               scales: {
                 x: {
                   ticks: {
                     color: "rgba(226,232,240,0.85)",
+                    maxRotation: 45,
+                    minRotation: 45,
                   },
                   grid: {
                     display: false,
@@ -570,41 +703,57 @@
                     color: "rgba(226,232,240,0.85)",
                   },
                 },
+                tooltip: {
+                  backgroundColor: "rgba(15, 23, 42, 0.95)",
+                  titleColor: "rgba(226, 232, 240, 1)",
+                  bodyColor: "rgba(226, 232, 240, 0.9)",
+                  borderColor: "rgba(99, 102, 241, 0.5)",
+                  borderWidth: 1,
+                },
               },
             },
           });
         } else {
+          // Update chart data efficiently
           latencyChart.data.labels = labels;
           latencyChart.data.datasets[0].data = values;
           latencyChart.data.datasets[0].label = datasetLabel;
           latencyChart.data.datasets[0].backgroundColor = backgroundColors;
-          latencyChart.update();
+          // Use 'none' mode for faster updates during auto-refresh
+          latencyChart.update("none");
         }
       }
 
+      /**
+       * Renders provider cards using DocumentFragment for better performance
+       * @param {DashboardSnapshot} snapshot - The dashboard snapshot
+       */
       function renderProviders(snapshot) {
-        providerCardsContainer.innerHTML = "";
-
+        // Use DocumentFragment to batch DOM operations
+        const fragment = document.createDocumentFragment();
+        
         snapshot.providers.forEach((provider) => {
           const card = providerCardTemplate.content.cloneNode(true);
           const [nameEl, subtitleEl] = card.querySelectorAll("h3, p");
           nameEl.textContent = provider.name;
+          nameEl.setAttribute("id", `provider-${provider.name.replace(/\s+/g, "-").toLowerCase()}`);
 
           const slotsBehind = provider.slots_behind ?? null;
           let relativeScore;
           if (provider.quarantined) {
             relativeScore = "Quarantined (cooldown)";
-          } else if (slotsBehind != null && slotsBehind >= 64) {
+          } else if (slotsBehind != null && slotsBehind >= SLOT_LAG_STALE_THRESHOLD) {
             relativeScore = "Stale commitment";
-          } else if (slotsBehind != null && slotsBehind >= 16) {
+          } else if (slotsBehind != null && slotsBehind >= SLOT_LAG_WATCH_THRESHOLD) {
             relativeScore = "Watch commitment";
-          } else if (provider.score <= 120) {
+          } else if (provider.score <= SCORE_PREFERRED_THRESHOLD) {
             relativeScore = "Preferred route";
-          } else if (provider.score <= 200) {
+          } else if (provider.score <= SCORE_BALANCED_THRESHOLD) {
             relativeScore = "Balanced candidate";
           } else {
             relativeScore = "Warm standby";
           }
+          
           const tagList = Array.isArray(provider.tags) && provider.tags.length
             ? provider.tags.join(", ")
             : "";
@@ -615,6 +764,7 @@
           const badgeLabel = statusBadge.querySelectorAll("span")[1];
 
           statusBadge.classList.add("px-3", "py-1", "rounded-full", "transition-colors", "duration-300");
+          statusBadge.setAttribute("aria-label", `Status: ${provider.quarantined ? "Quarantined" : provider.healthy ? "Healthy" : "Degraded"}`);
 
           if (provider.quarantined) {
             badgeLabel.textContent = "Quarantined";
@@ -652,6 +802,7 @@
               ? `Weight ${provider.weight} × ${provider.tag_multiplier.toFixed(2)}`
               : `Weight ${provider.weight}`;
           footerSpans[0].textContent = multiplierText;
+          
           if (provider.quarantined) {
             const releaseWindow = relativeTimeUntil(provider.quarantined_until_ms);
             footerSpans[1].textContent = releaseWindow
@@ -661,26 +812,64 @@
             footerSpans[1].textContent = provider.healthy ? "ACTIVE" : "STANDBY";
           }
 
-          providerCardsContainer.appendChild(card);
+          fragment.appendChild(card);
         });
+
+        // Single DOM update for all cards
+        providerCardsContainer.innerHTML = "";
+        providerCardsContainer.appendChild(fragment);
       }
 
-      async function fetchSnapshot() {
-        const res = await fetch("/metrics.json", {
-          headers: {
-            "cache-control": "no-cache",
-          },
-        });
-        if (!res.ok) {
-          throw new Error(`Failed to load metrics: ${res.status}`);
+      /**
+       * Fetches the metrics snapshot with retry logic
+       * @param {number} attempt - Current retry attempt (default: 0)
+       * @returns {Promise<DashboardSnapshot>} The dashboard snapshot
+       */
+      async function fetchSnapshot(attempt = 0) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
+          
+          const res = await fetch(METRICS_ENDPOINT, {
+            headers: {
+              "cache-control": "no-cache",
+            },
+            signal: controller.signal,
+          });
+          
+          clearTimeout(timeoutId);
+          
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}: ${res.statusText || "Failed to load metrics"}`);
+          }
+          
+          const data = await res.json();
+          retryCount = 0; // Reset on success
+          return data;
+        } catch (err) {
+          if (attempt < MAX_RETRY_ATTEMPTS && (err.name === "NetworkError" || err.name === "AbortError" || err.message.includes("HTTP"))) {
+            const delay = RETRY_DELAY_MS * Math.pow(2, attempt); // Exponential backoff
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            return fetchSnapshot(attempt + 1);
+          }
+          throw err;
         }
-        return res.json();
       }
 
+      /**
+       * Refreshes the dashboard data
+       */
       async function refresh() {
+        if (!isOnline) {
+          showError("You are currently offline. Please check your internet connection.");
+          updateAutoRefreshStatus("Offline");
+          return;
+        }
+
         clearError();
         refreshButton.disabled = true;
         refreshButton.classList.add("opacity-65");
+        refreshButton.setAttribute("aria-busy", "true");
         updateAutoRefreshStatus("Refreshing...");
 
         try {
@@ -690,19 +879,28 @@
           renderChart(snapshot, currentMetric);
           renderProviders(snapshot);
         } catch (err) {
-          console.error(err);
-          showError(err instanceof Error ? err.message : "Failed to load metrics snapshot.");
+          console.error("Failed to refresh dashboard:", err);
+          const errorMessage = err instanceof Error 
+            ? err.message 
+            : "Failed to load metrics snapshot. Please try again.";
+          showError(errorMessage);
+          
+          if (retryCount < MAX_RETRY_ATTEMPTS) {
+            retryCount++;
+          }
         } finally {
           refreshButton.disabled = false;
           refreshButton.classList.remove("opacity-65");
+          refreshButton.removeAttribute("aria-busy");
           updateAutoRefreshStatus();
         }
       }
 
+      // Event handlers
       refreshButton.addEventListener("click", () => {
         clearAutoRefreshTimers();
         refresh().finally(() => {
-          if (autoRefreshEnabled) {
+          if (autoRefreshEnabled && isOnline) {
             queueAutoRefresh();
           } else {
             updateAutoRefreshStatus();
@@ -710,9 +908,17 @@
         });
       });
 
+      // Keyboard support for refresh button
+      refreshButton.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          refreshButton.click();
+        }
+      });
+
       autoRefreshToggle.addEventListener("change", () => {
         autoRefreshEnabled = autoRefreshToggle.checked;
-        if (autoRefreshEnabled) {
+        if (autoRefreshEnabled && isOnline) {
           queueAutoRefresh();
         } else {
           clearAutoRefreshTimers();
@@ -721,11 +927,55 @@
         }
       });
 
-      // Initialize defaults
+      // Online/offline event handlers
+      window.addEventListener("online", () => {
+        isOnline = true;
+        clearError();
+        updateAutoRefreshStatus();
+        if (autoRefreshEnabled) {
+          refresh().finally(() => {
+            if (autoRefreshEnabled) {
+              queueAutoRefresh();
+            }
+          });
+        }
+      });
+
+      window.addEventListener("offline", () => {
+        isOnline = false;
+        clearAutoRefreshTimers();
+        showError("Connection lost. Auto-refresh paused.");
+        updateAutoRefreshStatus("Offline");
+      });
+
+      // Cleanup on page unload
+      window.addEventListener("beforeunload", () => {
+        clearAutoRefreshTimers();
+        if (latencyChart) {
+          latencyChart.destroy();
+          latencyChart = null;
+        }
+      });
+
+      // Handle visibility changes - pause when tab is hidden
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden) {
+          // Keep running but reduce frequency could be implemented here
+        } else if (autoRefreshEnabled && isOnline) {
+          // Resume if it was paused
+          if (!autoRefreshTimeoutId) {
+            queueAutoRefresh();
+          }
+        }
+      });
+
+      // Initialize
       setActiveMetric("latency");
       updateAutoRefreshStatus();
+      
+      // Initial load
       refresh().finally(() => {
-        if (autoRefreshEnabled) {
+        if (autoRefreshEnabled && isOnline) {
           queueAutoRefresh();
         } else {
           updateAutoRefreshStatus();

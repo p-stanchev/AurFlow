@@ -226,10 +226,30 @@ async fn handle_rpc(
             let delay = if idx == 0 {
                 std::time::Duration::from_millis(0)
             } else {
-                state.config.hedge_delay
+                // Use adaptive hedging if enabled, otherwise use fixed delay
+                if state.config.adaptive_hedging && idx == 1 {
+                    // Calculate adaptive delay based on primary provider's latency
+                    let primary_provider = &providers[0];
+                    let adaptive_delay_ms = state
+                        .metrics
+                        .calculate_adaptive_hedge_delay_ms(
+                            &primary_provider.name,
+                            state.config.hedge_delay.as_secs_f64() * 1000.0,
+                            state.config.hedge_min_delay_ms,
+                            state.config.hedge_max_delay_ms,
+                        )
+                        .await;
+                    let delay_ms = adaptive_delay_ms.round() as u64;
+                    state.metrics.record_hedge("adaptive");
+                    std::time::Duration::from_millis(delay_ms)
+                } else {
+                    state.config.hedge_delay
+                }
             };
             if delay > std::time::Duration::from_millis(0) {
-                state.metrics.record_hedge("timer");
+                if !state.config.adaptive_hedging || idx != 1 {
+                    state.metrics.record_hedge("timer");
+                }
             }
             let client = state.client.clone();
             let payload = body.clone();
@@ -730,6 +750,9 @@ mod tests {
             slot_lag_alert_slots: 50,
             hedge_requests: false,
             hedge_delay: Duration::from_millis(60),
+            adaptive_hedging: true,
+            hedge_min_delay_ms: 10.0,
+            hedge_max_delay_ms: 200.0,
             slo_target: 0.995,
             otel: OtelConfig {
                 exporter: OtelExporter::None,
@@ -937,6 +960,7 @@ mod tests {
         let mut config = test_config();
         config.hedge_requests = true;
         config.hedge_delay = Duration::from_millis(40);
+        config.adaptive_hedging = false; // Use fixed delay for test consistency
 
         let state = build_state_with_config(providers, config).await;
         let payload = json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]});
@@ -971,6 +995,95 @@ mod tests {
             .expect("slow provider snapshot");
         assert_eq!(slow.success, 0);
         assert_eq!(slow.errors, 0);
+    }
+
+    #[tokio::test]
+    async fn adaptive_hedging_uses_shorter_delay_for_slow_provider() {
+        // Test that adaptive hedging reduces delay for slow providers
+        let slow_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(150))
+                    .set_body_json(json!({"jsonrpc":"2.0","result":42,"id":1})),
+            )
+            .expect(1)
+            .mount(&slow_server)
+            .await;
+
+        let fast_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"jsonrpc":"2.0","result":9001,"id":1})),
+            )
+            .expect(1)
+            .mount(&fast_server)
+            .await;
+
+        let providers = vec![
+            Provider {
+                name: "SlowProvider".into(),
+                url: slow_server.uri(),
+                weight: 1,
+                headers: None,
+                tags: Vec::new(),
+            },
+            Provider {
+                name: "FastProvider".into(),
+                url: fast_server.uri(),
+                weight: 1,
+                headers: None,
+                tags: Vec::new(),
+            },
+        ];
+
+        let mut config = test_config();
+        config.hedge_requests = true;
+        config.hedge_delay = Duration::from_millis(60);
+        config.adaptive_hedging = true;
+        config.hedge_min_delay_ms = 10.0;
+        config.hedge_max_delay_ms = 200.0;
+
+        let state = build_state_with_config(providers, config).await;
+        
+        // First, record some slow latencies to build up the provider's latency history
+        // This makes the adaptive hedging algorithm think the provider is slow
+        for _ in 0..5 {
+            let payload = json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]});
+            let request = make_request(payload);
+            let _ = handle_rpc(request, state.clone()).await;
+            // Give metrics time to update
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Now test that adaptive hedging kicks in with shorter delay
+        let payload = json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]});
+        let request = make_request(payload);
+        let start = std::time::Instant::now();
+        let response = handle_rpc(request, state.clone()).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The fast provider should win due to adaptive hedging
+        let headers = response.headers().clone();
+        assert_eq!(
+            headers
+                .get("x-orlb-provider")
+                .and_then(|value| value.to_str().ok()),
+            Some("FastProvider")
+        );
+
+        // Response time should be faster than if we waited for the slow provider
+        // Adaptive hedging should have triggered early enough
+        assert!(elapsed.as_millis() < 150, "Adaptive hedging should reduce wait time");
+
+        let body = to_bytes(response.into_body()).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&body).unwrap;
+        assert_eq!(parsed.get("result"), Some(&Value::from(9001)));
     }
 
     #[tokio::test]

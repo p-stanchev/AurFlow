@@ -70,7 +70,10 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_SLOT_LAG_PENALTY_MS` | `5` | Weighted-score penalty (ms) applied per slot behind the freshest provider |
 | `ORLB_SLOT_LAG_ALERT_SLOTS` | `50` | `orlb doctor` warns when a provider lags this many slots |
 | `ORLB_HEDGE_REQUESTS` | `false` | Launch a hedged request when the primary read call stalls |
-| `ORLB_HEDGE_DELAY_MS` | `60` | Delay before the hedged provider is attempted |
+| `ORLB_HEDGE_DELAY_MS` | `60` | Base delay (ms) before the hedged provider is attempted |
+| `ORLB_ADAPTIVE_HEDGING` | `true` | Enable adaptive hedging that adjusts delay based on provider latency |
+| `ORLB_HEDGE_MIN_DELAY_MS` | `10` | Minimum hedge delay (ms) for adaptive mode |
+| `ORLB_HEDGE_MAX_DELAY_MS` | `200` | Maximum hedge delay (ms) for adaptive mode |
 | `ORLB_SLO_TARGET` | `0.995` | Availability target used for rolling SLO burn-rate calculations |
 | `ORLB_OTEL_EXPORTER` | `none` | OpenTelemetry exporter (`none`, `stdout`, or `otlp_http`) |
 | `ORLB_OTEL_ENDPOINT` | unset | OTLP endpoint when `ORLB_OTEL_EXPORTER=otlp_http` (e.g. `http://collector:4318`) |
@@ -100,6 +103,13 @@ Run `cargo run -- doctor` (or the compiled binary with `orlb doctor`) to lint th
 ### Hedged Requests
 Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the primary read stalls. The primary is dispatched immediately; if the call is still in flight after `ORLB_HEDGE_DELAY_MS`, a second provider is raced and the fastest success wins while the slower request is cancelled. Hedging only applies to retryable read methods, respects the global retry limit, and surfaces activity through the `orlb_hedges_total{reason}` Prometheus counter.
 
+**Adaptive Hedging** (default: enabled) automatically adjusts the hedge delay based on each provider's recent latency characteristics to reduce p99 latency:
+- **Slow providers**: Hedge earlier (shorter delay) to prevent long stalls
+- **Fast providers**: Use normal or slightly longer delays to avoid unnecessary parallel requests
+- **Failing providers**: Hedge very early (50% of calculated delay) when recent failures are detected
+- Adaptive delays are clamped between `ORLB_HEDGE_MIN_DELAY_MS` and `ORLB_HEDGE_MAX_DELAY_MS`
+- Set `ORLB_ADAPTIVE_HEDGING=false` to use fixed delays for all providers
+
 
 ### HTTP Endpoints
 - `POST /rpc`   JSON-RPC forwarding (read-only enforced, retries once on retryable failures).
@@ -111,7 +121,7 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 - `orlb_requests_total{provider,method,status}`   counts per upstream and outcome.
 - `orlb_request_failures_total{provider,reason}`   upstream failures grouped by reason.
 - `orlb_retries_total{reason}`   retry invocations (transport/timeouts/status codes).
-- `orlb_hedges_total{reason}`   hedged request launches grouped by trigger (`timer`, `status`, etc.).
+- `orlb_hedges_total{reason}`   hedged request launches grouped by trigger (`adaptive`, `timer`, `status`, etc.).
 - `orlb_provider_latency_ms{provider}`   latest latency measurement.
 - `orlb_provider_health{provider}`   `1` healthy, `0` degraded.
 - `orlb_provider_slot{provider,commitment}`   most recent slot observed for processed/confirmed/finalized commitments.
@@ -193,9 +203,9 @@ Set secrets for any private provider headers or API keys. The service is statele
 - Subscription/WebSocket fan-out.
 - API key rate limiting and auth.
 - Edge deployments across regions, optional caching (e.g., `getLatestBlockhash`).
-- Adaptive parallelism/hedging to shave p99 latency when a provider stalls.
+- ~~Adaptive parallelism/hedging to shave p99 latency when a provider stalls.~~ ✅
 - ~~Provider tagging/policies to express traffic weights by tier (paid vs public pools).~~ ✅
-- ~~SLO-aware alerting that turns Prometheus metrics into burn-rate signals.~~ ?
+- ~~SLO-aware alerting that turns Prometheus metrics into burn-rate signals.~~ ✅
 - Optional secret-manager (Vault/GCP/AWS) integration for provider API keys.
 
 ## License

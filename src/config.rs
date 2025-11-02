@@ -19,6 +19,9 @@ pub struct Config {
     pub slot_lag_alert_slots: u64,
     pub hedge_requests: bool,
     pub hedge_delay: Duration,
+    pub adaptive_hedging: bool,
+    pub hedge_min_delay_ms: f64,
+    pub hedge_max_delay_ms: f64,
     pub slo_target: f64,
     pub otel: OtelConfig,
     pub tag_weights: HashMap<String, f64>,
@@ -71,6 +74,17 @@ impl Config {
             Duration::from_millis(5),
             Duration::from_millis(500),
         );
+        let adaptive_hedging = parse_env("ORLB_ADAPTIVE_HEDGING", "true", parse_bool)?;
+        let hedge_min_delay_ms = clamp_f64(
+            parse_env("ORLB_HEDGE_MIN_DELAY_MS", "10", parse_f64)?,
+            5.0,
+            100.0,
+        );
+        let hedge_max_delay_ms = clamp_f64(
+            parse_env("ORLB_HEDGE_MAX_DELAY_MS", "200", parse_f64)?,
+            50.0,
+            1000.0,
+        );
         let slo_target = clamp_f64(
             parse_env("ORLB_SLO_TARGET", "0.995", parse_f64)?,
             0.9,
@@ -106,6 +120,9 @@ impl Config {
             slot_lag_alert_slots,
             hedge_requests,
             hedge_delay,
+            adaptive_hedging,
+            hedge_min_delay_ms,
+            hedge_max_delay_ms,
             slo_target,
             otel: OtelConfig {
                 exporter: otel_exporter,
