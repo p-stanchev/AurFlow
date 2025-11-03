@@ -1147,7 +1147,7 @@ struct Bucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, OtelConfig, OtelExporter};
+    use crate::config::{Config, OtelConfig, OtelExporter, SecretBackend, SecretsConfig};
     use crate::registry::{Provider, Registry};
     use std::collections::HashMap;
     use std::path::PathBuf;
@@ -1159,6 +1159,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            sample_signature: None,
             parsed_headers: None,
         }
     }
@@ -1184,6 +1185,9 @@ mod tests {
                 service_name: "orlb-test".into(),
             },
             tag_weights: HashMap::new(),
+            secrets: SecretsConfig {
+                backend: SecretBackend::None,
+            },
         }
     }
 
@@ -1322,6 +1326,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: vec!["paid".into()],
+                sample_signature: None,
                 parsed_headers: None,
             },
             Provider {
@@ -1330,6 +1335,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: vec!["public".into()],
+                sample_signature: None,
                 parsed_headers: None,
             },
         ])

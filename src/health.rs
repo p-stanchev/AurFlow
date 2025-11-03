@@ -11,10 +11,17 @@ use crate::commitment::Commitment;
 use crate::forward;
 use crate::metrics::{CommitmentSlots, Metrics};
 use crate::registry::{Provider, Registry};
+use crate::secrets::SecretManager;
 
 const HEALTH_METHOD: &str = "getSlot";
 
-pub async fn run(registry: Registry, metrics: Metrics, client: Client, probe_interval: Duration) {
+pub async fn run(
+    registry: Registry,
+    metrics: Metrics,
+    client: Client,
+    probe_interval: Duration,
+    secrets: SecretManager,
+) {
     let payload = json!({
         "jsonrpc": "2.0",
         "id": "orlb-health",
@@ -36,10 +43,18 @@ pub async fn run(registry: Registry, metrics: Metrics, client: Client, probe_int
             let payload = payload_bytes.clone();
             let client = client.clone();
             let metrics = metrics.clone();
+            let secrets = secrets.clone();
 
             tasks.spawn(async move {
-                if let Err(err) =
-                    probe_provider(client, metrics, provider, payload.clone(), probe_interval).await
+                if let Err(err) = probe_provider(
+                    client,
+                    metrics,
+                    provider,
+                    payload.clone(),
+                    probe_interval,
+                    secrets,
+                )
+                .await
                 {
                     tracing::warn!(error = ?err, "health probe failed");
                 }
@@ -60,9 +75,10 @@ async fn probe_provider(
     provider: Provider,
     payload: Bytes,
     interval: Duration,
+    secrets: SecretManager,
 ) -> Result<()> {
     let start = Instant::now();
-    let response = match forward::send_request(&client, &provider, payload).await {
+    let response = match forward::send_request(&client, &provider, payload, &secrets).await {
         Ok(resp) => resp,
         Err(err) => {
             metrics
@@ -110,7 +126,9 @@ async fn probe_provider(
 
     let mut slots = CommitmentSlots::from_slot(Commitment::Finalized, slot);
     for commitment in [Commitment::Confirmed, Commitment::Processed] {
-        if let Some(extra_slot) = fetch_commitment_slot(&client, &provider, commitment).await {
+        if let Some(extra_slot) =
+            fetch_commitment_slot(&client, &provider, commitment, &secrets).await
+        {
             slots.set(commitment, Some(extra_slot));
         }
     }
@@ -147,6 +165,7 @@ async fn fetch_commitment_slot(
     client: &Client,
     provider: &Provider,
     commitment: Commitment,
+    secrets: &SecretManager,
 ) -> Option<u64> {
     let payload = json!({
         "jsonrpc": "2.0",
@@ -171,7 +190,7 @@ async fn fetch_commitment_slot(
         }
     };
 
-    let response = match forward::send_request(client, provider, payload).await {
+    let response = match forward::send_request(client, provider, payload, secrets).await {
         Ok(resp) => resp,
         Err(err) => {
             tracing::debug!(

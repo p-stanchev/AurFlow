@@ -4,15 +4,16 @@ use std::time::Instant;
 use anyhow::{anyhow, Result};
 use bytes::Bytes;
 use reqwest::header::HeaderName;
-use reqwest::Url;
+use reqwest::{Client, Url};
 use serde_json::{json, Value};
 use tokio::task::JoinSet;
 
 use crate::config::Config;
 use crate::forward;
 use crate::registry::{Header, Provider, Registry};
+use crate::secrets::SecretManager;
 
-pub async fn run(config: Config, registry: Registry) -> Result<()> {
+pub async fn run(config: Config, registry: Registry, secrets: SecretManager) -> Result<()> {
     println!(
         "Running ORLB doctor against {} provider(s)...",
         registry.len()
@@ -21,7 +22,8 @@ pub async fn run(config: Config, registry: Registry) -> Result<()> {
     let mut issues = Vec::new();
     validate_providers(registry.providers(), &mut issues);
 
-    let (reports, connectivity_issues) = connectivity_probe(&config, registry.providers()).await?;
+    let (reports, connectivity_issues) =
+        connectivity_probe(&config, registry.providers(), &secrets).await?;
     issues.extend(connectivity_issues);
 
     if reports.is_empty() {
@@ -37,6 +39,13 @@ pub async fn run(config: Config, registry: Registry) -> Result<()> {
                 "    - {:<24} {:>6.1} ms (slot {})",
                 report.name, report.latency_ms, slot
             );
+            if let Some(tx) = &report.transaction {
+                let tx_slot = tx
+                    .slot
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "--".into());
+                println!("        sample tx {} (slot {})", tx.signature, tx_slot);
+            }
         }
         if let Some(best_slot) = reports.iter().filter_map(|r| r.slot).max() {
             println!("Latest observed slot: {}", best_slot);
@@ -149,11 +158,18 @@ struct ProbeReport {
     name: String,
     latency_ms: f64,
     slot: Option<u64>,
+    transaction: Option<TransactionProbe>,
+}
+
+struct TransactionProbe {
+    signature: String,
+    slot: Option<u64>,
 }
 
 async fn connectivity_probe(
     config: &Config,
     providers: &[Provider],
+    secrets: &SecretManager,
 ) -> Result<(Vec<ProbeReport>, Vec<String>)> {
     if providers.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -172,9 +188,10 @@ async fn connectivity_probe(
     for provider in providers.iter().cloned() {
         let client = client.clone();
         let payload = payload.clone();
+        let secrets = secrets.clone();
         probes.spawn(async move {
             let start = Instant::now();
-            match forward::send_request(&client, &provider, payload).await {
+            match forward::send_request(&client, &provider, payload, &secrets).await {
                 Ok(response) => {
                     let latency = start.elapsed();
                     let status = response.status();
@@ -194,10 +211,27 @@ async fn connectivity_probe(
                         }
                     };
                     let slot = extract_slot(&value);
+                    let transaction = match provider.sample_signature.as_ref() {
+                        Some(signature) => {
+                            match fetch_sample_transaction(&client, &provider, signature, &secrets)
+                                .await
+                            {
+                                Ok(tx) => Some(tx),
+                                Err(err) => {
+                                    return Err(format!(
+                                        "provider `{}` sample transaction `{}` failed: {}",
+                                        provider.name, signature, err
+                                    ));
+                                }
+                            }
+                        }
+                        None => None,
+                    };
                     Ok(ProbeReport {
                         name: provider.name,
                         latency_ms: latency.as_secs_f64() * 1000.0,
                         slot,
+                        transaction,
                     })
                 }
                 Err(err) => Err(format!(
@@ -229,5 +263,49 @@ fn extract_slot(value: &Value) -> Option<u64> {
         value
             .get("result")
             .and_then(|inner| inner.get("slot").and_then(Value::as_u64))
+    })
+}
+
+async fn fetch_sample_transaction(
+    client: &Client,
+    provider: &Provider,
+    signature: &str,
+    secrets: &SecretManager,
+) -> Result<TransactionProbe, String> {
+    let payload = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0",
+        "id": format!("orlb-doctor-{}", signature),
+        "method": "getTransaction",
+        "params": [
+            signature,
+            {
+                "encoding": "json",
+                "commitment": "confirmed"
+            }
+        ]
+    }))
+    .map(Bytes::from)
+    .map_err(|err| format!("failed to serialize transaction payload: {err}"))?;
+
+    let response = forward::send_request(client, provider, payload, secrets)
+        .await
+        .map_err(|err| format!("transport error: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!("status {}", response.status()));
+    }
+
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|err| format!("JSON decode failed: {err}"))?;
+    if value.get("result").is_none() {
+        return Err("missing result field".into());
+    }
+    let slot = value
+        .get("result")
+        .and_then(|inner| inner.get("slot").and_then(Value::as_u64));
+    Ok(TransactionProbe {
+        signature: signature.to_string(),
+        slot,
     })
 }

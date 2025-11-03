@@ -1,11 +1,12 @@
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, USER_AGENT};
 use reqwest::{Client, StatusCode};
 
-use crate::registry::Provider;
+use crate::registry::{HeaderValueKind, Provider};
+use crate::secrets::SecretManager;
 
 const USER_AGENT_VALUE: &str = "orlb/0.1 (https://github.com/open-rpc-lb)";
 
@@ -25,14 +26,32 @@ pub async fn send_request(
     client: &Client,
     provider: &Provider,
     payload: Bytes,
+    secrets: &SecretManager,
 ) -> Result<reqwest::Response> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
 
     if let Some(extra) = provider.parsed_headers.as_ref() {
-        for (name, value) in extra.iter() {
-            headers.insert(name.clone(), value.clone());
+        for parsed in extra.iter() {
+            match &parsed.value {
+                HeaderValueKind::Static(value) => {
+                    headers.insert(parsed.name.clone(), value.clone());
+                }
+                HeaderValueKind::Secret(reference) => {
+                    let secret = secrets
+                        .resolve(reference)
+                        .await
+                        .with_context(|| format!("resolving secret for header {}", parsed.name))?;
+                    let value = HeaderValue::try_from(secret.as_str()).map_err(|err| {
+                        anyhow!(
+                            "secret value for header {} is not a valid header: {err}",
+                            parsed.name
+                        )
+                    })?;
+                    headers.insert(parsed.name.clone(), value);
+                }
+            }
         }
     }
 

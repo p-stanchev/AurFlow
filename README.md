@@ -79,6 +79,10 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_OTEL_ENDPOINT` | unset | OTLP endpoint when `ORLB_OTEL_EXPORTER=otlp_http` (e.g. `http://collector:4318`) |
 | `ORLB_OTEL_SERVICE_NAME` | `orlb` | Service name attribute attached to emitted spans |
 | `ORLB_TAG_WEIGHTS` | unset | Optional comma-separated multipliers per tag (e.g. `paid=2.0,public=0.6`) |
+| `ORLB_SECRET_BACKEND` | `none` | Secret backend for header values (`none`, `vault`) |
+| `ORLB_VAULT_ADDR` | unset | Vault base URL when `ORLB_SECRET_BACKEND=vault` |
+| `ORLB_VAULT_TOKEN` | unset | Vault token with read access to referenced secrets |
+| `ORLB_VAULT_NAMESPACE` | unset | Optional Vault namespace header |
 
 `providers.json` format:
 ```json
@@ -90,7 +94,40 @@ ORLB is configured via environment variables and a provider registry file:
   {"name": "SolanaTracker", "url": "https://rpc.solanatracker.io/public", "weight": 1, "tags": ["public"]}
 ]
 ```
-Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`). Tune `weight` and `tags` to bias traffic toward trusted paid tiers while still keeping resilient public RPC coverage.
+Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`). Tune `weight` and `tags` to bias traffic toward trusted paid tiers while still keeping resilient public RPC coverage. Two additional niceties:
+
+- Set `"sample_signature"` to a known transaction hash so `orlb doctor` can verify archival depth with a `getTransaction` call.
+- Use `vault://mount/path#field` in place of any header value to lazily fetch API keys from HashiCorp Vault (with `ORLB_SECRET_BACKEND=vault` plus the Vault env vars configured). Secrets are requested once, cached in-memory, and injected into outgoing RPC calls without storing plaintext keys in `providers.json`.
+
+#### Secret manager quick start
+
+1. **Run Vault locally (optional)** — HashiCorp Vault OSS works fine (`vault server -dev` / docker). Create a secret, e.g.
+   ```bash
+   vault kv put kv/data/solana paid_rpc_key=super-secret
+   ```
+2. **Reference it in `providers.json`:**
+   ```json
+   {
+     "name": "Paid RPC",
+     "url": "https://rpc.example.com",
+     "headers": [
+       {
+         "name": "x-api-key",
+         "value": "vault://kv/data/solana#paid_rpc_key"
+       }
+     ]
+   }
+   ```
+3. **Export env vars before `cargo run`:**
+   ```bash
+   export ORLB_SECRET_BACKEND=vault
+   export ORLB_VAULT_ADDR=http://127.0.0.1:8200
+   export ORLB_VAULT_TOKEN=root        # token with read access
+   # export ORLB_VAULT_NAMESPACE=team  # only if you use namespaces
+   ```
+4. **Start ORLB / run `orlb doctor`:** on the first request, ORLB fetches the referenced secret over HTTPS, caches it in memory, and injects it into outgoing headers. If the secret can’t be read, you’ll see a clear error in the logs/doctor output.
+
+This keeps API keys out of source control while still letting you ship a single `providers.json`.
 
 ### Provider tagging & policies
 - Add a `tags` array to any provider in `providers.json` (tags are normalised to lowercase and duplicates removed).
@@ -215,9 +252,11 @@ Set secrets for any private provider headers or API keys. The service is statele
 - ~~Adaptive parallelism/hedging to shave p99 latency when a provider stalls.~~ ✅
 - ~~Provider tagging/policies to express traffic weights by tier (paid vs public pools).~~ ✅
 - ~~SLO-aware alerting that turns Prometheus metrics into burn-rate signals.~~ ✅
-- Optional secret-manager (Vault/GCP/AWS) integration for provider API keys.
+- ~~Optional secret-manager (Vault/GCP/AWS) integration for provider API keys.~~ ✅
+- Multi-tenant policy engine (per-API-key quotas, method allowlists, billing hooks).
+- Deterministic replay harness that reissues archived request/response pairs across providers to spot divergence.
+- Pluggable secret backends (GCP Secret Manager, AWS Secrets Manager) using the same `secret://` syntax.
+- Provider marketplace: periodically benchmark latency/cost and auto-adjust weights via policy file.
 
 ## License
 Apache 2.0 (or adapt as needed). Feel free to fork and extend for demos or production load-balancing.
-
-

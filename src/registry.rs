@@ -6,6 +6,8 @@ use anyhow::{bail, Context, Result};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::Deserialize;
 
+use crate::secrets::{parse_secret_reference, SecretReference};
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Provider {
     pub name: String,
@@ -16,8 +18,10 @@ pub struct Provider {
     pub headers: Option<Vec<Header>>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
+    pub sample_signature: Option<String>,
     #[serde(skip, default)]
-    pub parsed_headers: Option<Arc<Vec<(HeaderName, HeaderValue)>>>,
+    pub parsed_headers: Option<Arc<Vec<ParsedHeader>>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -93,6 +97,14 @@ fn normalise_providers(providers: &mut [Provider]) -> Result<()> {
         tags.sort();
         tags.dedup();
         provider.tags = tags;
+        provider.sample_signature = provider.sample_signature.as_ref().and_then(|sig| {
+            let trimmed = sig.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
 
         provider.parsed_headers = match provider.headers.as_ref() {
             Some(headers) if !headers.is_empty() => {
@@ -104,14 +116,24 @@ fn normalise_providers(providers: &mut [Provider]) -> Result<()> {
                             header.name, provider.name
                         )
                     })?;
-                    let value =
-                        HeaderValue::try_from(header.value.as_str()).with_context(|| {
-                            format!(
-                                "invalid header value for `{}` on provider `{}`",
-                                header.name, provider.name
-                            )
-                        })?;
-                    parsed.push((name, value));
+                    if let Some(secret) = parse_secret_reference(&header.value)? {
+                        parsed.push(ParsedHeader {
+                            name,
+                            value: HeaderValueKind::Secret(secret),
+                        });
+                    } else {
+                        let value =
+                            HeaderValue::try_from(header.value.as_str()).with_context(|| {
+                                format!(
+                                    "invalid header value for `{}` on provider `{}`",
+                                    header.name, provider.name
+                                )
+                            })?;
+                        parsed.push(ParsedHeader {
+                            name,
+                            value: HeaderValueKind::Static(value),
+                        });
+                    }
                 }
                 Some(Arc::new(parsed))
             }
@@ -119,4 +141,16 @@ fn normalise_providers(providers: &mut [Provider]) -> Result<()> {
         };
     }
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+pub struct ParsedHeader {
+    pub name: HeaderName,
+    pub value: HeaderValueKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum HeaderValueKind {
+    Static(HeaderValue),
+    Secret(SecretReference),
 }

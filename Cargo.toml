@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+regex = "1.10"
 anyhow = "1.0"
 bytes = "1.6"
 hyper = { version = "0.14", features = ["full"] }

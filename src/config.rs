@@ -25,6 +25,7 @@ pub struct Config {
     pub slo_target: f64,
     pub otel: OtelConfig,
     pub tag_weights: HashMap<String, f64>,
+    pub secrets: SecretsConfig,
 }
 
 /// OpenTelemetry configuration derived from environment variables.
@@ -40,6 +41,24 @@ pub enum OtelExporter {
     None,
     Stdout,
     OtlpHttp { endpoint: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct SecretsConfig {
+    pub backend: SecretBackend,
+}
+
+#[derive(Clone, Debug)]
+pub enum SecretBackend {
+    None,
+    Vault(VaultConfig),
+}
+
+#[derive(Clone, Debug)]
+pub struct VaultConfig {
+    pub addr: String,
+    pub token: String,
+    pub namespace: Option<String>,
 }
 
 impl Config {
@@ -113,6 +132,7 @@ impl Config {
         let otel_exporter = parse_otel_exporter(&otel_exporter_raw, otel_endpoint)?;
         let tag_weights_raw = env::var("ORLB_TAG_WEIGHTS").unwrap_or_default();
         let tag_weights = parse_tag_weights(tag_weights_raw.trim())?;
+        let secrets = parse_secret_backend()?;
 
         Ok(Self {
             listen_addr,
@@ -134,6 +154,7 @@ impl Config {
                 service_name: otel_service_name,
             },
             tag_weights,
+            secrets,
         })
     }
 }
@@ -263,6 +284,33 @@ fn parse_tag_weights(input: &str) -> Result<HashMap<String, f64>> {
     }
 
     Ok(weights)
+}
+
+fn parse_secret_backend() -> Result<SecretsConfig> {
+    let backend = env::var("ORLB_SECRET_BACKEND")
+        .unwrap_or_else(|_| "none".into())
+        .to_ascii_lowercase();
+    let backend = match backend.as_str() {
+        "" | "none" => SecretBackend::None,
+        "vault" => {
+            let addr = env::var("ORLB_VAULT_ADDR").map_err(|_| {
+                anyhow!("ORLB_VAULT_ADDR must be set when ORLB_SECRET_BACKEND=vault")
+            })?;
+            let token = env::var("ORLB_VAULT_TOKEN").map_err(|_| {
+                anyhow!("ORLB_VAULT_TOKEN must be set when ORLB_SECRET_BACKEND=vault")
+            })?;
+            let namespace = env::var("ORLB_VAULT_NAMESPACE")
+                .ok()
+                .filter(|value| !value.is_empty());
+            SecretBackend::Vault(VaultConfig {
+                addr,
+                token,
+                namespace,
+            })
+        }
+        other => return Err(anyhow!("unsupported secret backend `{other}`")),
+    };
+    Ok(SecretsConfig { backend })
 }
 
 #[cfg(test)]

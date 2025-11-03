@@ -26,6 +26,7 @@ use crate::errors::OrlbError;
 use crate::forward;
 use crate::metrics::Metrics;
 use crate::registry::Provider;
+use crate::secrets::SecretManager;
 
 const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
 const DASHBOARD_PATH: &str = "/dashboard";
@@ -55,6 +56,7 @@ struct AppState {
     metrics: Metrics,
     client: Client,
     concurrency: ProviderConcurrency,
+    secrets: SecretManager,
 }
 
 #[derive(Clone)]
@@ -86,7 +88,12 @@ impl ProviderConcurrency {
     }
 }
 
-pub async fn start_server(config: Config, metrics: Metrics, client: Client) -> Result<()> {
+pub async fn start_server(
+    config: Config,
+    metrics: Metrics,
+    client: Client,
+    secrets: SecretManager,
+) -> Result<()> {
     let listen_addr = config.listen_addr;
     let provider_registry = metrics.registry();
     let concurrency = ProviderConcurrency::new(provider_registry.providers());
@@ -95,6 +102,7 @@ pub async fn start_server(config: Config, metrics: Metrics, client: Client) -> R
         metrics,
         client,
         concurrency,
+        secrets,
     });
 
     let make_svc = make_service_fn(move |_conn| {
@@ -293,13 +301,15 @@ async fn handle_rpc(
             let permit = state.concurrency.acquire(&provider.name).await;
             let client = state.client.clone();
             let payload = body.clone();
+            let state_clone = state.clone();
             join_set.spawn(async move {
                 let _permit = permit;
                 if delay > std::time::Duration::from_millis(0) {
                     sleep(delay).await;
                 }
                 let start = Instant::now();
-                let result = forward::send_request(&client, &provider, payload).await;
+                let result =
+                    forward::send_request(&client, &provider, payload, &state_clone.secrets).await;
                 (provider, start.elapsed(), result)
             });
         }
@@ -431,7 +441,9 @@ async fn handle_rpc(
             let _permit = state.concurrency.acquire(&provider.name).await;
             let start = Instant::now();
 
-            match forward::send_request(&state.client, &provider, body.clone()).await {
+            match forward::send_request(&state.client, &provider, body.clone(), &state.secrets)
+                .await
+            {
                 Ok(upstream) => {
                     let status = upstream.status();
                     let latency = start.elapsed();
@@ -792,10 +804,11 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use crate::config::{Config, OtelConfig, OtelExporter};
+    use crate::config::{Config, OtelConfig, OtelExporter, SecretBackend, SecretsConfig};
     use crate::forward::build_http_client;
     use crate::metrics::CommitmentSlots;
     use crate::registry::{Provider, Registry};
+    use crate::secrets::SecretManager;
 
     fn test_config() -> Config {
         Config {
@@ -818,6 +831,9 @@ mod tests {
                 service_name: "orlb-test".into(),
             },
             tag_weights: HashMap::new(),
+            secrets: SecretsConfig {
+                backend: SecretBackend::None,
+            },
         }
     }
 
@@ -831,12 +847,14 @@ mod tests {
         let provider_registry = metrics.registry();
         let concurrency = ProviderConcurrency::new(provider_registry.providers());
         let client = build_http_client(Duration::from_secs(5)).unwrap();
+        let secrets = SecretManager::new(&config.secrets).unwrap();
 
         Arc::new(AppState {
             config,
             metrics,
             client,
             concurrency,
+            secrets,
         })
     }
 
@@ -878,6 +896,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            sample_signature: None,
             parsed_headers: None,
         };
 
@@ -937,6 +956,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                sample_signature: None,
                 parsed_headers: None,
             },
             Provider {
@@ -945,6 +965,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                sample_signature: None,
                 parsed_headers: None,
             },
         ];
@@ -1011,6 +1032,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                sample_signature: None,
                 parsed_headers: None,
             },
             Provider {
@@ -1019,6 +1041,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                sample_signature: None,
                 parsed_headers: None,
             },
         ];
@@ -1095,6 +1118,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                sample_signature: None,
                 parsed_headers: None,
             },
             Provider {
@@ -1103,6 +1127,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                sample_signature: None,
                 parsed_headers: None,
             },
         ];
@@ -1190,6 +1215,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            sample_signature: None,
             parsed_headers: None,
         };
 
@@ -1240,6 +1266,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                sample_signature: None,
                 parsed_headers: None,
             },
             Provider {
@@ -1248,6 +1275,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                sample_signature: None,
                 parsed_headers: None,
             },
         ];

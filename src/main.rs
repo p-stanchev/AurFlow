@@ -8,6 +8,7 @@ mod health;
 mod metrics;
 mod registry;
 mod router;
+mod secrets;
 mod telemetry;
 
 use anyhow::Result;
@@ -16,6 +17,7 @@ use crate::config::Config;
 use crate::forward::build_http_client;
 use crate::metrics::Metrics;
 use crate::registry::Registry;
+use crate::secrets::SecretManager;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -25,10 +27,11 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
     let _telemetry = telemetry::init(&config)?;
+    let secrets = SecretManager::new(&config.secrets)?;
     let registry = Registry::load(&config.providers_path)?;
 
     if matches!(subcommand.as_deref(), Some("doctor")) {
-        doctor::run(config.clone(), registry.clone()).await?;
+        doctor::run(config.clone(), registry.clone(), secrets.clone()).await?;
         return Ok(());
     }
 
@@ -45,6 +48,7 @@ async fn main() -> Result<()> {
     let health_metrics = metrics.clone();
     let health_client = client.clone();
     let probe_interval = config.probe_interval;
+    let health_secrets = secrets.clone();
 
     tokio::spawn(async move {
         tracing::info!(
@@ -56,9 +60,10 @@ async fn main() -> Result<()> {
             health_metrics,
             health_client,
             probe_interval,
+            health_secrets,
         )
         .await;
     });
 
-    router::start_server(config, metrics, client).await
+    router::start_server(config, metrics, client, secrets).await
 }
