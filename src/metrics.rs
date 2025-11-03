@@ -763,6 +763,61 @@ impl Metrics {
         self.hedges.with_label_values(&[reason]).inc();
     }
 
+    #[cfg(test)]
+    pub async fn test_seed_latency_samples(
+        &self,
+        provider: &str,
+        method: &str,
+        latency: Duration,
+        count: u32,
+    ) {
+        for _ in 0..count {
+            self.record_request_success(provider, method, latency).await;
+        }
+    }
+
+    #[cfg(test)]
+    pub async fn test_seed_health_sample(
+        &self,
+        provider: &str,
+        latency: Duration,
+        slots: CommitmentSlots,
+    ) {
+        self.record_health_success(provider, latency, slots).await;
+    }
+
+    #[cfg(test)]
+    pub async fn test_override_provider_state(
+        &self,
+        provider: &str,
+        latency_ms: f64,
+        consecutive_failures: u32,
+        success_count: u64,
+    ) {
+        let mut guard = self.state.write().await;
+        let state = guard
+            .entry(provider.to_string())
+            .or_insert_with(ProviderState::new);
+        state.latency_ema_ms = latency_ms.max(1.0);
+        state.last_latency_ms = Some(latency_ms.max(1.0));
+        state.request_success_count = success_count.max(1);
+        state.probe_success_count = success_count.max(1);
+        state.request_error_count = if consecutive_failures > 0 {
+            success_count.saturating_add(1)
+        } else {
+            state.request_error_count
+        };
+        state.probe_error_count = 0;
+        state.consecutive_failures = consecutive_failures;
+        state.healthy = consecutive_failures == 0;
+        state.last_updated = SystemTime::now();
+        drop(guard);
+
+        self.provider_health
+            .with_label_values(&[provider])
+            .set(if consecutive_failures == 0 { 1 } else { 0 });
+    }
+
     /// Calculates adaptive hedge delay based on provider's latency characteristics
     /// Returns delay in milliseconds. Lower delays mean hedge earlier (for slow providers)
     /// Uses p95/p99 estimates to predict when a provider might stall
@@ -787,8 +842,8 @@ impl Metrics {
         } else {
             raw_ema
         };
-
-        // Use simple estimates derived from EMA to avoid nested lock re-entrancy.
+        // Use simple estimates derived from EMA to avoid nested lock re-entrancy. These multipliers
+        // approximate typical p95/p99 offsets (2.5x/3.5x) and can be tuned as real histograms are gathered.
         let p95_estimate = ema * 2.5;
         let p99_estimate = ema * 3.5;
 
@@ -1291,5 +1346,72 @@ mod tests {
             .expect("public provider present");
         assert_eq!(public.tag_multiplier, 1.0);
         assert_eq!(public.effective_weight, public.weight as f64);
+    }
+
+    #[tokio::test]
+    async fn adaptive_delay_is_shorter_for_slow_providers() {
+        let registry = Registry::from_providers(vec![
+            provider("Slow", "https://slow.example.com"),
+            provider("Fast", "https://fast.example.com"),
+        ])
+        .unwrap();
+        let config = test_config();
+        let metrics = Metrics::new(registry, &config).unwrap();
+
+        metrics
+            .test_override_provider_state("Slow", 220.0, 0, 10)
+            .await;
+        metrics
+            .test_override_provider_state("Fast", 40.0, 0, 10)
+            .await;
+
+        let slow_delay = metrics
+            .calculate_adaptive_hedge_delay_ms("Slow", 60.0, 10.0, 200.0)
+            .await;
+        let fast_delay = metrics
+            .calculate_adaptive_hedge_delay_ms("Fast", 60.0, 10.0, 200.0)
+            .await;
+
+        assert!(
+            slow_delay < fast_delay,
+            "expected slow provider delay ({slow_delay}) to be shorter than fast provider ({fast_delay})"
+        );
+        assert!(
+            slow_delay <= 60.0,
+            "slow provider should hedge sooner than base delay"
+        );
+    }
+
+    #[tokio::test]
+    async fn adaptive_delay_reacts_to_failures() {
+        let registry =
+            Registry::from_providers(vec![provider("Flaky", "https://flaky.example.com")]).unwrap();
+        let config = test_config();
+        let metrics = Metrics::new(registry, &config).unwrap();
+
+        metrics
+            .test_override_provider_state("Flaky", 120.0, 0, 10)
+            .await;
+
+        let before_failure = metrics
+            .calculate_adaptive_hedge_delay_ms("Flaky", 100.0, 5.0, 200.0)
+            .await;
+
+        metrics
+            .test_override_provider_state("Flaky", 120.0, 2, 10)
+            .await;
+
+        let after_failure = metrics
+            .calculate_adaptive_hedge_delay_ms("Flaky", 100.0, 5.0, 200.0)
+            .await;
+
+        assert!(
+            after_failure < before_failure,
+            "expected failure-adjusted delay ({after_failure}) to be shorter than baseline ({before_failure})"
+        );
+        assert!(
+            after_failure <= before_failure * 0.6,
+            "failure factor should reduce delay substantially"
+        );
     }
 }

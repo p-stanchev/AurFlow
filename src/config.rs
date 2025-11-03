@@ -264,3 +264,44 @@ fn parse_tag_weights(input: &str) -> Result<HashMap<String, f64>> {
 
     Ok(weights)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+
+    fn reset_env() {
+        env::remove_var("ORLB_HEDGE_MIN_DELAY_MS");
+        env::remove_var("ORLB_HEDGE_MAX_DELAY_MS");
+    }
+
+    #[test]
+    fn rejects_inverted_hedge_delays() {
+        reset_env();
+        env::set_var("ORLB_HEDGE_MIN_DELAY_MS", "80");
+        env::set_var("ORLB_HEDGE_MAX_DELAY_MS", "60");
+
+        let result = Config::from_env();
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("ORLB_HEDGE_MIN_DELAY_MS"),
+            "expected inverted hedge delay to error"
+        );
+        reset_env();
+    }
+
+    #[test]
+    fn accepts_valid_hedge_delays() {
+        reset_env();
+        env::set_var("ORLB_HEDGE_MIN_DELAY_MS", "20");
+        env::set_var("ORLB_HEDGE_MAX_DELAY_MS", "120");
+
+        let config = Config::from_env().expect("valid hedge delay bounds");
+        assert_eq!(config.hedge_min_delay_ms, 20.0);
+        assert_eq!(config.hedge_max_delay_ms, 120.0);
+        reset_env();
+    }
+}

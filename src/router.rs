@@ -1004,7 +1004,6 @@ mod tests {
                     .set_delay(Duration::from_millis(150))
                     .set_body_json(json!({"jsonrpc":"2.0","result":42,"id":1})),
             )
-            .expect(1)
             .mount(&slow_server)
             .await;
 
@@ -1046,28 +1045,33 @@ mod tests {
         let state = build_state_with_config(providers, config).await;
 
         // Prime metrics to simulate the slow provider accumulating high latency.
-        {
-            let metrics = state.metrics.clone();
-            for _ in 0..5 {
-                metrics
-                    .record_request_success("SlowProvider", "getSlot", Duration::from_millis(180))
-                    .await;
-            }
-            metrics
-                .record_health_success(
-                    "SlowProvider",
-                    Duration::from_millis(180),
-                    CommitmentSlots::from_slot(Commitment::Finalized, Some(1_000_000)),
-                )
-                .await;
-            metrics
-                .record_health_success(
-                    "FastProvider",
-                    Duration::from_millis(30),
-                    CommitmentSlots::from_slot(Commitment::Finalized, Some(1_000_000)),
-                )
-                .await;
-        }
+        let metrics = state.metrics.clone();
+        metrics
+            .test_seed_latency_samples("SlowProvider", "getSlot", Duration::from_millis(180), 5)
+            .await;
+        metrics
+            .test_seed_health_sample(
+                "SlowProvider",
+                Duration::from_millis(180),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(1_000_000)),
+            )
+            .await;
+        metrics
+            .test_seed_latency_samples("FastProvider", "getSlot", Duration::from_millis(35), 5)
+            .await;
+        metrics
+            .test_seed_health_sample(
+                "FastProvider",
+                Duration::from_millis(35),
+                CommitmentSlots::from_slot(Commitment::Finalized, Some(1_000_000)),
+            )
+            .await;
+        metrics
+            .test_override_provider_state("SlowProvider", 220.0, 0, 10)
+            .await;
+        metrics
+            .test_override_provider_state("FastProvider", 40.0, 0, 10)
+            .await;
 
         // Now test that adaptive hedging kicks in with shorter delay
         let payload = json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]});

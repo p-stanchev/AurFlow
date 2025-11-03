@@ -72,7 +72,7 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_HEDGE_REQUESTS` | `false` | Launch a hedged request when the primary read call stalls |
 | `ORLB_HEDGE_DELAY_MS` | `60` | Base delay (ms) before the hedged provider is attempted |
 | `ORLB_ADAPTIVE_HEDGING` | `true` | Enable adaptive hedging that adjusts delay based on provider latency |
-| `ORLB_HEDGE_MIN_DELAY_MS` | `10` | Minimum hedge delay (ms) for adaptive mode |
+| `ORLB_HEDGE_MIN_DELAY_MS` | `10` | Minimum hedge delay (ms) for adaptive mode *(must be ≤ `ORLB_HEDGE_MAX_DELAY_MS`)* |
 | `ORLB_HEDGE_MAX_DELAY_MS` | `200` | Maximum hedge delay (ms) for adaptive mode |
 | `ORLB_SLO_TARGET` | `0.995` | Availability target used for rolling SLO burn-rate calculations |
 | `ORLB_OTEL_EXPORTER` | `none` | OpenTelemetry exporter (`none`, `stdout`, or `otlp_http`) |
@@ -140,15 +140,24 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 ![Grafana ORLB overview dashboard](ops/grafana/orlb-dashboard.png)
 _Grafana dashboard showing live request rates, error-budget burn, and provider latency once Prometheus is scraping ORLB._
 ## Testing
-Unit-style tests live alongside the router and cover forwarding success, retry failover, and write-method rejection. Run the full suite with:
-```bash
-cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
-```
-Continuous integration in `.github/workflows/ci.yml` enforces the same checks.
-Run `bash scripts/smoke.sh` against a running instance to verify `/metrics` responds and Prometheus reports the `orlb` target as healthy.
+- Unit-style tests live alongside the router and metrics modules. Run the full suite and lint passes with:
+  ```bash
+  cargo fmt --all
+  cargo clippy --all-targets --all-features -- -D warnings
+  cargo test
+  ```
+- Continuous integration in `.github/workflows/ci.yml` enforces the same checks.
+- `bash scripts/smoke.sh` (or the PowerShell equivalent) hits `/rpc` and `/metrics` against a running instance to verify the happy path quickly.
 
+### Adaptive Hedging Tuning
+The adaptive hedge delay currently derives p95/p99 latency estimates from each provider’s EMA using 2.5x/3.5x multipliers. When you gather real histograms, tweak those multipliers in `src/metrics.rs` and update the focused tests to match your data:
+
+```bash
+cargo test adaptive_delay_is_shorter_for_slow_providers
+cargo test adaptive_delay_reacts_to_failures
+```
+
+Test-only helpers such as `Metrics::test_seed_latency_samples`, `test_seed_health_sample`, and `test_override_provider_state` let you prime provider state without coupling to internal structures.
 ## Docker
 ### Single-container quick start
 ```bash
