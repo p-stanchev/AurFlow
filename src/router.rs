@@ -225,26 +225,23 @@ async fn handle_rpc(
         for (idx, provider) in providers.iter().take(max_attempts).cloned().enumerate() {
             let delay = if idx == 0 {
                 std::time::Duration::from_millis(0)
+            } else if state.config.adaptive_hedging && idx == 1 {
+                // Calculate adaptive delay based on primary provider's latency
+                let primary_provider = &providers[0];
+                let adaptive_delay_ms = state
+                    .metrics
+                    .calculate_adaptive_hedge_delay_ms(
+                        &primary_provider.name,
+                        state.config.hedge_delay.as_secs_f64() * 1000.0,
+                        state.config.hedge_min_delay_ms,
+                        state.config.hedge_max_delay_ms,
+                    )
+                    .await;
+                let delay_ms = adaptive_delay_ms.max(0.0).round().min(u64::MAX as f64) as u64;
+                state.metrics.record_hedge("adaptive");
+                std::time::Duration::from_millis(delay_ms)
             } else {
-                // Use adaptive hedging if enabled, otherwise use fixed delay
-                if state.config.adaptive_hedging && idx == 1 {
-                    // Calculate adaptive delay based on primary provider's latency
-                    let primary_provider = &providers[0];
-                    let adaptive_delay_ms = state
-                        .metrics
-                        .calculate_adaptive_hedge_delay_ms(
-                            &primary_provider.name,
-                            state.config.hedge_delay.as_secs_f64() * 1000.0,
-                            state.config.hedge_min_delay_ms,
-                            state.config.hedge_max_delay_ms,
-                        )
-                        .await;
-                    let delay_ms = adaptive_delay_ms.round() as u64;
-                    state.metrics.record_hedge("adaptive");
-                    std::time::Duration::from_millis(delay_ms)
-                } else {
-                    state.config.hedge_delay
-                }
+                state.config.hedge_delay
             };
             if delay > std::time::Duration::from_millis(0) {
                 if !state.config.adaptive_hedging || idx != 1 {
@@ -885,8 +882,7 @@ mod tests {
         ];
 
         let state = build_state(providers).await;
-        let payload =
-            json!({"jsonrpc":"2.0","id": request_id,"method":"getSlot","params":[]});
+        let payload = json!({"jsonrpc":"2.0","id": request_id,"method":"getSlot","params":[]});
         let request = make_request(payload);
 
         let response = handle_rpc(request, state.clone()).await.unwrap();
@@ -1048,15 +1044,29 @@ mod tests {
         config.hedge_max_delay_ms = 200.0;
 
         let state = build_state_with_config(providers, config).await;
-        
-        // First, record some slow latencies to build up the provider's latency history
-        // This makes the adaptive hedging algorithm think the provider is slow
-        for _ in 0..5 {
-            let payload = json!({"jsonrpc":"2.0","id":1,"method":"getSlot","params":[]});
-            let request = make_request(payload);
-            let _ = handle_rpc(request, state.clone()).await;
-            // Give metrics time to update
-            tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Prime metrics to simulate the slow provider accumulating high latency.
+        {
+            let metrics = state.metrics.clone();
+            for _ in 0..5 {
+                metrics
+                    .record_request_success("SlowProvider", "getSlot", Duration::from_millis(180))
+                    .await;
+            }
+            metrics
+                .record_health_success(
+                    "SlowProvider",
+                    Duration::from_millis(180),
+                    CommitmentSlots::from_slot(Commitment::Finalized, Some(1_000_000)),
+                )
+                .await;
+            metrics
+                .record_health_success(
+                    "FastProvider",
+                    Duration::from_millis(30),
+                    CommitmentSlots::from_slot(Commitment::Finalized, Some(1_000_000)),
+                )
+                .await;
         }
 
         // Now test that adaptive hedging kicks in with shorter delay
@@ -1079,10 +1089,13 @@ mod tests {
 
         // Response time should be faster than if we waited for the slow provider
         // Adaptive hedging should have triggered early enough
-        assert!(elapsed.as_millis() < 150, "Adaptive hedging should reduce wait time");
+        assert!(
+            elapsed.as_millis() < 150,
+            "Adaptive hedging should reduce wait time"
+        );
 
         let body = to_bytes(response.into_body()).await.unwrap();
-        let parsed: Value = serde_json::from_slice(&body).unwrap;
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed.get("result"), Some(&Value::from(9001)));
     }
 
@@ -1214,6 +1227,25 @@ mod tests {
 fn request_id_seed(id: &Value, count: usize) -> Option<usize> {
     if count == 0 {
         return None;
+    }
+    if let Some(num) = id.as_u64() {
+        let modulo = count as u64;
+        if modulo == 0 {
+            return Some(0);
+        }
+        return Some(((num.saturating_sub(1)) % modulo) as usize);
+    }
+    if let Some(num) = id.as_i64() {
+        if count == 1 {
+            return Some(0);
+        }
+        let adjusted = (num - 1).rem_euclid(count as i64);
+        return Some(adjusted as usize);
+    }
+    if let Some(text) = id.as_str() {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        return Some((hasher.finish() as usize) % count);
     }
     let serialized = serde_json::to_string(id).ok()?;
     let mut hasher = DefaultHasher::new();

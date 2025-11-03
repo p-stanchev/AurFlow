@@ -85,6 +85,11 @@ impl Config {
             50.0,
             1000.0,
         );
+        if hedge_min_delay_ms > hedge_max_delay_ms {
+            return Err(anyhow!(
+                "ORLB_HEDGE_MIN_DELAY_MS ({hedge_min_delay_ms}) must be <= ORLB_HEDGE_MAX_DELAY_MS ({hedge_max_delay_ms})"
+            ));
+        }
         let slo_target = clamp_f64(
             parse_env("ORLB_SLO_TARGET", "0.995", parse_f64)?,
             0.9,
