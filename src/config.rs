@@ -268,7 +268,11 @@ fn parse_tag_weights(input: &str) -> Result<HashMap<String, f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use once_cell::sync::Lazy;
     use std::env;
+    use std::sync::Mutex;
+
+    static ENV_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
     fn reset_env() {
         env::remove_var("ORLB_HEDGE_MIN_DELAY_MS");
@@ -277,6 +281,7 @@ mod tests {
 
     #[test]
     fn rejects_inverted_hedge_delays() {
+        let _lock = ENV_GUARD.lock().unwrap();
         reset_env();
         env::set_var("ORLB_HEDGE_MIN_DELAY_MS", "80");
         env::set_var("ORLB_HEDGE_MAX_DELAY_MS", "60");
@@ -295,6 +300,7 @@ mod tests {
 
     #[test]
     fn accepts_valid_hedge_delays() {
+        let _lock = ENV_GUARD.lock().unwrap();
         reset_env();
         env::set_var("ORLB_HEDGE_MIN_DELAY_MS", "20");
         env::set_var("ORLB_HEDGE_MAX_DELAY_MS", "120");
