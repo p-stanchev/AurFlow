@@ -629,6 +629,15 @@ impl Metrics {
             .collect();
 
         let best_finalized = *best_slots.get(&Commitment::Finalized).unwrap_or(&0);
+        let min_finalized = state
+            .values()
+            .filter_map(|s| s.slots.get(Commitment::Finalized))
+            .filter(|slot| *slot > 0)
+            .min()
+            .unwrap_or(best_finalized);
+        let alert_base = self.slot_lag_alert_slots.max(1);
+        let cluster_skew = best_finalized.saturating_sub(min_finalized)
+            > alert_base.saturating_mul(MULTI_CLUSTER_SPREAD_MULTIPLIER);
 
         let mut providers: Vec<_> = self
             .registry
@@ -686,7 +695,11 @@ impl Metrics {
                         Some(best_finalized.saturating_sub(value))
                     }
                 });
-                let slot_penalty = compute_slot_penalty(slots_behind, self.slot_lag_penalty_ms);
+                let slot_penalty = if cluster_skew {
+                    0.0
+                } else {
+                    compute_slot_penalty(slots_behind, self.slot_lag_penalty_ms)
+                };
                 let total_errors = request_errors.saturating_add(probe_errors);
                 let raw_score = compute_score(ema, failures, total_errors, slot_penalty);
                 let tag_multiplier = self.tag_multiplier(provider);
