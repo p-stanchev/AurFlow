@@ -174,7 +174,7 @@ async fn connectivity_probe(
         let payload = payload.clone();
         probes.spawn(async move {
             let start = Instant::now();
-            match forward::send_request(&client, &provider, payload.as_ref()).await {
+            match forward::send_request(&client, &provider, payload).await {
                 Ok(response) => {
                     let latency = start.elapsed();
                     let status = response.status();

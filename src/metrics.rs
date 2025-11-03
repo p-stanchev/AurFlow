@@ -75,6 +75,7 @@ pub struct Metrics {
     provider_slot: GaugeVec,
     provider_errors: IntCounterVec,
     hedges: IntCounterVec,
+    hedge_outcomes: IntCounterVec,
     slo_availability: GaugeVec,
     slo_burn_rate: GaugeVec,
     slo_window_requests: GaugeVec,
@@ -204,6 +205,10 @@ impl Metrics {
             Opts::new("hedges_total", "Hedged request launches by reason"),
             &["reason"],
         )?;
+        let hedge_outcomes = IntCounterVec::new(
+            Opts::new("hedge_outcomes_total", "Outcome of hedged request attempts"),
+            &["outcome"],
+        )?;
         let slo_availability = GaugeVec::new(
             Opts::new("slo_availability_ratio", "Rolling availability ratio"),
             &["window"],
@@ -253,6 +258,7 @@ impl Metrics {
         prometheus_registry.register(Box::new(provider_slot.clone()))?;
         prometheus_registry.register(Box::new(provider_errors.clone()))?;
         prometheus_registry.register(Box::new(hedges.clone()))?;
+        prometheus_registry.register(Box::new(hedge_outcomes.clone()))?;
         prometheus_registry.register(Box::new(slo_availability.clone()))?;
         prometheus_registry.register(Box::new(slo_burn_rate.clone()))?;
         prometheus_registry.register(Box::new(slo_window_requests.clone()))?;
@@ -295,6 +301,7 @@ impl Metrics {
             provider_slot,
             provider_errors,
             hedges,
+            hedge_outcomes,
             slo_availability,
             slo_burn_rate,
             slo_window_requests,
@@ -763,6 +770,14 @@ impl Metrics {
         self.hedges.with_label_values(&[reason]).inc();
     }
 
+    pub fn record_hedge_outcome(&self, outcome: &str) {
+        self.hedge_outcomes.with_label_values(&[outcome]).inc();
+    }
+
+    pub fn registry(&self) -> Registry {
+        self.registry.clone()
+    }
+
     #[cfg(test)]
     pub async fn test_seed_latency_samples(
         &self,
@@ -1144,6 +1159,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            parsed_headers: None,
         }
     }
 
@@ -1306,6 +1322,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: vec!["paid".into()],
+                parsed_headers: None,
             },
             Provider {
                 name: "Public".into(),
@@ -1313,6 +1330,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: vec!["public".into()],
+                parsed_headers: None,
             },
         ])
         .unwrap();

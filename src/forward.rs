@@ -1,10 +1,11 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, USER_AGENT};
+use bytes::Bytes;
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE, USER_AGENT};
 use reqwest::{Client, StatusCode};
 
-use crate::registry::{Header, Provider};
+use crate::registry::Provider;
 
 const USER_AGENT_VALUE: &str = "orlb/0.1 (https://github.com/open-rpc-lb)";
 
@@ -23,20 +24,22 @@ pub fn build_http_client(timeout: Duration) -> Result<Client> {
 pub async fn send_request(
     client: &Client,
     provider: &Provider,
-    payload: &[u8],
+    payload: Bytes,
 ) -> Result<reqwest::Response> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(USER_AGENT, HeaderValue::from_static(USER_AGENT_VALUE));
 
-    if let Some(extra) = provider.headers.as_ref() {
-        apply_custom_headers(&mut headers, extra)?;
+    if let Some(extra) = provider.parsed_headers.as_ref() {
+        for (name, value) in extra.iter() {
+            headers.insert(name.clone(), value.clone());
+        }
     }
 
     let response = client
         .post(&provider.url)
         .headers(headers)
-        .body(payload.to_vec())
+        .body(payload)
         .send()
         .await
         .with_context(|| format!("request to {} failed", provider.name))?;
@@ -50,15 +53,4 @@ pub fn is_retryable_status(status: StatusCode) -> bool {
 
 pub fn normalize_method_name(method: &str) -> &str {
     method.trim()
-}
-
-fn apply_custom_headers(map: &mut HeaderMap, headers: &[Header]) -> Result<()> {
-    for header in headers {
-        let name = HeaderName::try_from(header.name.as_str())
-            .with_context(|| format!("invalid header name `{}`", header.name))?;
-        let value = HeaderValue::try_from(header.value.as_str())
-            .with_context(|| format!("invalid header value for `{}`", header.name))?;
-        map.insert(name, value);
-    }
-    Ok(())
 }

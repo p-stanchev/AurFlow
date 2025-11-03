@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use reqwest::header::{HeaderName, HeaderValue};
 use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -15,6 +16,8 @@ pub struct Provider {
     pub headers: Option<Vec<Header>>,
     #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(skip, default)]
+    pub parsed_headers: Option<Arc<Vec<(HeaderName, HeaderValue)>>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -40,7 +43,7 @@ impl Registry {
             )
         })?;
 
-        normalise_providers(&mut providers);
+        normalise_providers(&mut providers)?;
 
         if providers.is_empty() {
             bail!("provider registry is empty");
@@ -57,7 +60,7 @@ impl Registry {
             bail!("provider registry cannot be empty");
         }
         let mut providers = providers;
-        normalise_providers(&mut providers);
+        normalise_providers(&mut providers)?;
         Ok(Self {
             providers: Arc::new(providers),
         })
@@ -76,7 +79,7 @@ fn default_weight() -> u16 {
     1
 }
 
-fn normalise_providers(providers: &mut [Provider]) {
+fn normalise_providers(providers: &mut [Provider]) -> Result<()> {
     for provider in providers.iter_mut() {
         if let Some(headers) = provider.headers.as_mut() {
             headers.retain(|header| !header.name.trim().is_empty());
@@ -90,5 +93,30 @@ fn normalise_providers(providers: &mut [Provider]) {
         tags.sort();
         tags.dedup();
         provider.tags = tags;
+
+        provider.parsed_headers = match provider.headers.as_ref() {
+            Some(headers) if !headers.is_empty() => {
+                let mut parsed = Vec::with_capacity(headers.len());
+                for header in headers {
+                    let name = HeaderName::try_from(header.name.as_str()).with_context(|| {
+                        format!(
+                            "invalid header name `{}` for provider `{}`",
+                            header.name, provider.name
+                        )
+                    })?;
+                    let value =
+                        HeaderValue::try_from(header.value.as_str()).with_context(|| {
+                            format!(
+                                "invalid header value for `{}` on provider `{}`",
+                                header.name, provider.name
+                            )
+                        })?;
+                    parsed.push((name, value));
+                }
+                Some(Arc::new(parsed))
+            }
+            _ => None,
+        };
     }
+    Ok(())
 }

@@ -62,7 +62,7 @@ async fn probe_provider(
     interval: Duration,
 ) -> Result<()> {
     let start = Instant::now();
-    let response = match forward::send_request(&client, &provider, payload.as_ref()).await {
+    let response = match forward::send_request(&client, &provider, payload).await {
         Ok(resp) => resp,
         Err(err) => {
             metrics
@@ -158,8 +158,8 @@ async fn fetch_commitment_slot(
             }
         ]
     });
-    let bytes = match serde_json::to_vec(&payload) {
-        Ok(vec) => vec,
+    let payload = match serde_json::to_vec(&payload) {
+        Ok(vec) => Bytes::from(vec),
         Err(err) => {
             tracing::debug!(
                 error = ?err,
@@ -171,7 +171,7 @@ async fn fetch_commitment_slot(
         }
     };
 
-    let response = match forward::send_request(client, provider, &bytes).await {
+    let response = match forward::send_request(client, provider, payload).await {
         Ok(resp) => resp,
         Err(err) => {
             tracing::debug!(

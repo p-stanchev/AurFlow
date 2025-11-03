@@ -1,4 +1,4 @@
-use std::collections::{hash_map::DefaultHasher, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -14,6 +14,7 @@ use once_cell::sync::Lazy;
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::signal;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -34,15 +35,15 @@ const RPC_PATH: &str = "/rpc";
 
 static MUTATING_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
-        "sendTransaction",
-        "sendRawTransaction",
-        "signTransaction",
-        "signAndSendTransaction",
-        "requestAirdrop",
-        "setComputeUnitLimit",
-        "setComputeUnitPrice",
-        "setLogFilter",
-        "setPriorityFee",
+        "sendtransaction",
+        "sendrawtransaction",
+        "signtransaction",
+        "signandsendtransaction",
+        "requestairdrop",
+        "setcomputeunitlimit",
+        "setcomputeunitprice",
+        "setlogfilter",
+        "setpriorityfee",
     ]
     .into_iter()
     .collect()
@@ -53,14 +54,47 @@ struct AppState {
     config: Config,
     metrics: Metrics,
     client: Client,
+    concurrency: ProviderConcurrency,
+}
+
+#[derive(Clone)]
+struct ProviderConcurrency {
+    limits: Arc<HashMap<String, Arc<Semaphore>>>,
+}
+
+impl ProviderConcurrency {
+    fn new(providers: &[Provider]) -> Self {
+        let mut limits = HashMap::with_capacity(providers.len());
+        for provider in providers {
+            let base = usize::from(provider.weight.max(1));
+            let permits = (base * 4).max(1);
+            limits.insert(provider.name.clone(), Arc::new(Semaphore::new(permits)));
+        }
+        Self {
+            limits: Arc::new(limits),
+        }
+    }
+
+    async fn acquire(&self, provider_name: &str) -> OwnedSemaphorePermit {
+        self.limits
+            .get(provider_name)
+            .expect("missing semaphore for provider")
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed")
+    }
 }
 
 pub async fn start_server(config: Config, metrics: Metrics, client: Client) -> Result<()> {
     let listen_addr = config.listen_addr;
+    let provider_registry = metrics.registry();
+    let concurrency = ProviderConcurrency::new(provider_registry.providers());
     let state = Arc::new(AppState {
         config,
         metrics,
         client,
+        concurrency,
     });
 
     let make_svc = make_service_fn(move |_conn| {
@@ -217,6 +251,14 @@ async fn handle_rpc(
     let mut last_provider: Option<String> = None;
 
     if hedge_enabled {
+        let primary_provider_name = providers.first().map(|p| p.name.clone());
+        let mut hedge_outcome_recorded = false;
+        let mut record_outcome = |outcome: &str| {
+            if !hedge_outcome_recorded {
+                state.metrics.record_hedge_outcome(outcome);
+                hedge_outcome_recorded = true;
+            }
+        };
         let mut join_set: JoinSet<(
             Provider,
             std::time::Duration,
@@ -248,14 +290,16 @@ async fn handle_rpc(
                     state.metrics.record_hedge("timer");
                 }
             }
+            let permit = state.concurrency.acquire(&provider.name).await;
             let client = state.client.clone();
             let payload = body.clone();
             join_set.spawn(async move {
+                let _permit = permit;
                 if delay > std::time::Duration::from_millis(0) {
                     sleep(delay).await;
                 }
                 let start = Instant::now();
-                let result = forward::send_request(&client, &provider, payload.as_ref()).await;
+                let result = forward::send_request(&client, &provider, payload).await;
                 (provider, start.elapsed(), result)
             });
         }
@@ -281,6 +325,17 @@ async fn handle_rpc(
                             .metrics
                             .record_request_success(&provider.name, &method_label, latency)
                             .await;
+
+                        let outcome = if primary_provider_name
+                            .as_ref()
+                            .map(|name| name == &provider.name)
+                            .unwrap_or(false)
+                        {
+                            "primary"
+                        } else {
+                            "hedged"
+                        };
+                        record_outcome(outcome);
 
                         tracing::info!(
                             provider = provider.name,
@@ -321,6 +376,8 @@ async fn handle_rpc(
                         continue;
                     }
 
+                    record_outcome("exhausted");
+
                     let headers = upstream.headers().clone();
                     let body_bytes = upstream.bytes().await.map_err(|err| {
                         (
@@ -344,6 +401,7 @@ async fn handle_rpc(
                         state.metrics.record_retry("transport").await;
                         continue;
                     }
+                    record_outcome("exhausted");
                 }
                 Err(join_err) => {
                     last_error = Some(format!("hedged task join error: {join_err}"));
@@ -360,16 +418,20 @@ async fn handle_rpc(
                     response_id.clone(),
                 )
             })?;
+            record_outcome("exhausted");
             return Ok(build_upstream_response(
                 status, &headers, &provider, body_bytes, latency,
             ));
         }
+
+        record_outcome("exhausted");
     } else {
         for provider in providers {
             attempts += 1;
+            let _permit = state.concurrency.acquire(&provider.name).await;
             let start = Instant::now();
 
-            match forward::send_request(&state.client, &provider, &body).await {
+            match forward::send_request(&state.client, &provider, body.clone()).await {
                 Ok(upstream) => {
                     let status = upstream.status();
                     let latency = start.elapsed();
@@ -602,11 +664,11 @@ fn error_response(err: OrlbError, id: Option<Value>) -> Response<Body> {
 }
 
 fn is_mutating_method(method: &str) -> bool {
-    let trimmed = method.trim();
-    MUTATING_METHODS.contains(trimmed)
-        || trimmed.starts_with("send")
-        || trimmed.starts_with("sign")
-        || trimmed.starts_with("requestAirdrop")
+    let normalized = method.trim().to_ascii_lowercase();
+    MUTATING_METHODS.contains(normalized.as_str())
+        || normalized.starts_with("send")
+        || normalized.starts_with("sign")
+        || normalized.starts_with("requestairdrop")
 }
 
 struct RequestMetadata {
@@ -766,12 +828,15 @@ mod tests {
     async fn build_state_with_config(providers: Vec<Provider>, config: Config) -> Arc<AppState> {
         let registry = Registry::from_providers(providers).unwrap();
         let metrics = Metrics::new(registry, &config).unwrap();
+        let provider_registry = metrics.registry();
+        let concurrency = ProviderConcurrency::new(provider_registry.providers());
         let client = build_http_client(Duration::from_secs(5)).unwrap();
 
         Arc::new(AppState {
             config,
             metrics,
             client,
+            concurrency,
         })
     }
 
@@ -813,6 +878,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            parsed_headers: None,
         };
 
         let state = build_state(vec![provider.clone()]).await;
@@ -871,6 +937,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                parsed_headers: None,
             },
             Provider {
                 name: "Secondary".into(),
@@ -878,6 +945,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                parsed_headers: None,
             },
         ];
 
@@ -943,6 +1011,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                parsed_headers: None,
             },
             Provider {
                 name: "Fast".into(),
@@ -950,6 +1019,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                parsed_headers: None,
             },
         ];
 
@@ -1025,6 +1095,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                parsed_headers: None,
             },
             Provider {
                 name: "FastProvider".into(),
@@ -1032,6 +1103,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                parsed_headers: None,
             },
         ];
 
@@ -1118,6 +1190,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            parsed_headers: None,
         };
 
         let state = build_state(vec![provider]).await;
@@ -1167,6 +1240,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                parsed_headers: None,
             },
             Provider {
                 name: "Second".into(),
@@ -1174,6 +1248,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                parsed_headers: None,
             },
         ];
 
