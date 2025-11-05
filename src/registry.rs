@@ -19,6 +19,8 @@ pub struct Provider {
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
+    pub ws_url: Option<String>,
+    #[serde(default)]
     pub sample_signature: Option<String>,
     #[serde(skip, default)]
     pub parsed_headers: Option<Arc<Vec<ParsedHeader>>>,
@@ -97,6 +99,14 @@ fn normalise_providers(providers: &mut [Provider]) -> Result<()> {
         tags.sort();
         tags.dedup();
         provider.tags = tags;
+        provider.ws_url = provider.ws_url.as_ref().and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
         provider.sample_signature = provider.sample_signature.as_ref().and_then(|sig| {
             let trimmed = sig.trim();
             if trimmed.is_empty() {

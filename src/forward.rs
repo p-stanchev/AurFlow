@@ -8,7 +8,7 @@ use reqwest::{Client, StatusCode};
 use crate::registry::{HeaderValueKind, Provider};
 use crate::secrets::SecretManager;
 
-const USER_AGENT_VALUE: &str = "orlb/0.1 (https://github.com/open-rpc-lb)";
+pub(crate) const USER_AGENT_VALUE: &str = "orlb/0.1 (https://github.com/open-rpc-lb)";
 
 pub fn build_http_client(timeout: Duration) -> Result<Client> {
     let client = Client::builder()

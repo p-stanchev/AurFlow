@@ -27,12 +27,14 @@ use crate::forward;
 use crate::metrics::Metrics;
 use crate::registry::Provider;
 use crate::secrets::SecretManager;
+use crate::ws;
 
 const MAX_PAYLOAD_BYTES: usize = 512 * 1024;
 const DASHBOARD_PATH: &str = "/dashboard";
 const METRICS_PATH: &str = "/metrics";
 const METRICS_JSON_PATH: &str = "/metrics.json";
 const RPC_PATH: &str = "/rpc";
+const WS_PATH: &str = "/ws";
 
 static MUTATING_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
@@ -51,12 +53,12 @@ static MUTATING_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
 });
 
 #[derive(Clone)]
-struct AppState {
-    config: Config,
-    metrics: Metrics,
-    client: Client,
+pub(crate) struct AppState {
+    pub(crate) config: Config,
+    pub(crate) metrics: Metrics,
+    pub(crate) client: Client,
     concurrency: ProviderConcurrency,
-    secrets: SecretManager,
+    pub(crate) secrets: SecretManager,
 }
 
 #[derive(Clone)]
@@ -134,6 +136,7 @@ async fn route(req: Request<Body>, state: Arc<AppState>) -> Response<Body> {
         (&Method::GET, RPC_PATH) => method_not_allowed(),
         (&Method::GET, METRICS_PATH) => handle_metrics(&state).await,
         (&Method::GET, METRICS_JSON_PATH) => handle_metrics_json(&state).await,
+        (&Method::GET, WS_PATH) => ws::handle(req, state).await,
         (&Method::GET, DASHBOARD_PATH) | (&Method::GET, "/") => {
             match dashboard::serve(&state.config) {
                 Ok(response) => response,
@@ -896,6 +899,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            ws_url: None,
             sample_signature: None,
             parsed_headers: None,
         };
@@ -956,6 +960,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
@@ -965,6 +970,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
@@ -1032,6 +1038,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
@@ -1041,6 +1048,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
@@ -1118,6 +1126,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
@@ -1127,6 +1136,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
@@ -1215,6 +1225,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            ws_url: None,
             sample_signature: None,
             parsed_headers: None,
         };
@@ -1266,6 +1277,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
@@ -1275,6 +1287,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: Vec::new(),
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },

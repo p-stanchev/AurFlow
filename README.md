@@ -16,6 +16,7 @@ ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across 
 - **Commitment-aware routing** - inspects JSON-RPC commitment hints and prefers providers whose slot height satisfies processed/confirmed/finalized requirements.
 - **Tier-aware weighting** - tag providers (paid/public/foundation, etc.) and boost or de-prioritise traffic with configurable multipliers.
 - **Adaptive hedging** - optional parallel requests race a backup provider when the primary stalls.
+- **Subscription fan-out** - `/ws` WebSocket endpoint mirrors subscriptions to multiple healthy upstreams.
 - **Observability** - `/metrics` (Prometheus text) and `/metrics.json` plus `/dashboard` (Chart.js) showing live scores.
 - **Doctor CLI** - `orlb doctor` lints the registry, validates headers, and probes each upstream before you deploy.
 - **Simple ops** - single binary with embedded dashboard, configurable via env vars, ships with Dockerfile and CI.
@@ -72,7 +73,7 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_HEDGE_REQUESTS` | `false` | Launch a hedged request when the primary read call stalls |
 | `ORLB_HEDGE_DELAY_MS` | `60` | Base delay (ms) before the hedged provider is attempted |
 | `ORLB_ADAPTIVE_HEDGING` | `true` | Enable adaptive hedging that adjusts delay based on provider latency |
-| `ORLB_HEDGE_MIN_DELAY_MS` | `10` | Minimum hedge delay (ms) for adaptive mode *(must be ≤ `ORLB_HEDGE_MAX_DELAY_MS`)* |
+| `ORLB_HEDGE_MIN_DELAY_MS` | `10` | Minimum hedge delay (ms) for adaptive mode *(must be = `ORLB_HEDGE_MAX_DELAY_MS`)* |
 | `ORLB_HEDGE_MAX_DELAY_MS` | `200` | Maximum hedge delay (ms) for adaptive mode |
 | `ORLB_SLO_TARGET` | `0.995` | Availability target used for rolling SLO burn-rate calculations |
 | `ORLB_OTEL_EXPORTER` | `none` | OpenTelemetry exporter (`none`, `stdout`, or `otlp_http`) |
@@ -94,9 +95,9 @@ ORLB is configured via environment variables and a provider registry file:
   {"name": "SolanaTracker", "url": "https://rpc.solanatracker.io/public", "weight": 1, "tags": ["public"]}
 ]
 ```
-Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`). Tune `weight` and `tags` to bias traffic toward trusted paid tiers while still keeping resilient public RPC coverage. Two additional niceties:
-
-- Set `"sample_signature"` to a known transaction hash so `orlb doctor` can verify archival depth with a `getTransaction` call.
+Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`). Tune `weight` and `tags` to bias traffic toward trusted paid tiers while still keeping resilient public RPC coverage. A few additional niceties:
+- Provide `ws_url` when the upstream exposes WebSockets on a different host or path; otherwise ORLB rewrites `https://` to `wss://` automatically.
+- Set `sample_signature` to a known transaction hash so `orlb doctor` can verify archival depth with a `getTransaction` call.
 - Use `vault://mount/path#field` in place of any header value to lazily fetch API keys from HashiCorp Vault (with `ORLB_SECRET_BACKEND=vault` plus the Vault env vars configured). Secrets are requested once, cached in-memory, and injected into outgoing RPC calls without storing plaintext keys in `providers.json`.
 
 #### Secret manager quick start
@@ -246,7 +247,7 @@ Set secrets for any private provider headers or API keys. The service is statele
 
 ## Roadmap Ideas
 - ~~Commitment-aware routing (processed/confirmed/finalized scoring).~~ ✅
-- Subscription/WebSocket fan-out.
+- ~~Subscription/WebSocket fan-out.~~ ?
 - API key rate limiting and auth.
 - Edge deployments across regions, optional caching (e.g., `getLatestBlockhash`).
 - ~~Adaptive parallelism/hedging to shave p99 latency when a provider stalls.~~ ✅

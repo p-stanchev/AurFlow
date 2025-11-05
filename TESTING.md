@@ -114,6 +114,14 @@ Compare p99 latency metrics between the two modes - adaptive should show lower p
 4. The output should now include a `sample tx ... (slot …)` line per provider and fail fast if Vault lookups or `getTransaction` calls cannot be satisfied.
 5. If you see authorization failures, verify the Vault token policy grants read access to the referenced path and that the secret JSON contains the named key.
 
+### 7. WebSocket fan-out sanity check
+
+1. Ensure at least one provider exposes a WebSocket endpoint (`ws_url` in `providers.json` when it is not a straight `https://` to `wss://` swap).
+2. Start ORLB and connect with a client such as `websocat ws://localhost:8080/ws` or `npx wscat -c ws://localhost:8080/ws`.
+3. Issue a subscription payload (for example, a Solana `logsSubscribe`) and verify notifications arrive.
+4. Stop or firewall one upstream WebSocket to confirm the stream continues via the remaining providers without reconnecting.
+5. Resume the upstream and ensure fan-out resumes without dropping the client connection.
+
 ## Verify Adaptive Behavior
 
 ### Check latency history impact

@@ -10,6 +10,7 @@ mod registry;
 mod router;
 mod secrets;
 mod telemetry;
+mod ws;
 
 use anyhow::Result;
 

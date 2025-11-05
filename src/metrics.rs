@@ -1172,6 +1172,7 @@ mod tests {
             weight: 1,
             headers: None,
             tags: Vec::new(),
+            ws_url: None,
             sample_signature: None,
             parsed_headers: None,
         }
@@ -1339,6 +1340,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: vec!["paid".into()],
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
@@ -1348,6 +1350,7 @@ mod tests {
                 weight: 1,
                 headers: None,
                 tags: vec!["public".into()],
+                ws_url: None,
                 sample_signature: None,
                 parsed_headers: None,
             },
