@@ -247,7 +247,7 @@ Set secrets for any private provider headers or API keys. The service is statele
 
 ## Roadmap Ideas
 - ~~Commitment-aware routing (processed/confirmed/finalized scoring).~~ ✅
-- ~~Subscription/WebSocket fan-out.~~ ?
+- ~~Subscription/WebSocket fan-out.~~ ✅
 - API key rate limiting and auth.
 - Edge deployments across regions, optional caching (e.g., `getLatestBlockhash`).
 - ~~Adaptive parallelism/hedging to shave p99 latency when a provider stalls.~~ ✅
