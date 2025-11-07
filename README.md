@@ -190,6 +190,36 @@ This keeps API keys out of source control while still letting you ship a single 
 ### Diagnostics
 Run `cargo run -- doctor` (or the compiled binary with `orlb doctor`) to lint the provider registry and perform live reachability probes. The command flags duplicate names/URLs, invalid headers, zero weights, stale commitment (providers lagging more than `ORLB_SLOT_LAG_ALERT_SLOTS` slots), and transport/HTTP failures. A non-zero exit status indicates issues that should be fixed before deploying.
 
+### Deterministic replays
+`orlb replay path/to/bundle.json` reissues archived JSON-RPC calls against every configured provider and compares their responses (or an `expected` payload you captured earlier). The bundle is a JSON array:
+
+```json
+[
+  {
+    "id": "getSlot-finalized",
+    "description": "baseline getSlot at finalized commitment",
+    "request": {
+      "jsonrpc": "2.0",
+      "id": 99,
+      "method": "getSlot",
+      "params": [{"commitment": "finalized"}]
+    },
+    "expected": {
+      "jsonrpc": "2.0",
+      "id": 99,
+      "result": 275000000
+    }
+  }
+]
+```
+
+- `id` (optional) labels log lines; defaults to `entry-#`.
+- `description` (optional) is echoed in the output.
+- `request` must be a JSON-RPC object; ORLB re-sends it verbatim to every provider (secrets and headers are applied as usual).
+- `expected` (optional) provides a golden response to diff against; when omitted, the first successful provider response becomes the baseline.
+
+The command prints per-entry summaries (matches vs divergences vs outright failures) plus an aggregate footer so you can spot providers that drift from the pack.
+
 ### Hedged Requests
 Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the primary read stalls. The primary is dispatched immediately; if the call is still in flight after `ORLB_HEDGE_DELAY_MS`, a second provider is raced and the fastest success wins while the slower request is cancelled. Hedging only applies to retryable read methods, respects the global retry limit, and surfaces activity through the `orlb_hedges_total{reason}` Prometheus counter.
 
@@ -307,7 +337,7 @@ Set secrets for any private provider headers or API keys. The service is statele
 - ~~SLO-aware alerting that turns Prometheus metrics into burn-rate signals.~~ ✅
 - ~~Optional secret-manager (Vault/GCP/AWS) integration for provider API keys.~~ ✅
 - Multi-tenant policy engine (per-API-key quotas, method allowlists, billing hooks).
-- Deterministic replay harness that reissues archived request/response pairs across providers to spot divergence.
+- ~~Deterministic replay harness that reissues archived request/response pairs across providers to spot divergence.~~ ✅
 - ~~Pluggable secret backends (GCP Secret Manager, AWS Secrets Manager) using the same `secret://` syntax.~~ ✅
 - Provider marketplace: periodically benchmark latency/cost and auto-adjust weights via policy file.
 

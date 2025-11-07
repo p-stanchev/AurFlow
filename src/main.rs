@@ -7,6 +7,7 @@ mod forward;
 mod health;
 mod metrics;
 mod registry;
+mod replay;
 mod router;
 mod secrets;
 mod telemetry;
@@ -33,6 +34,14 @@ async fn main() -> Result<()> {
 
     if matches!(subcommand.as_deref(), Some("doctor")) {
         doctor::run(config.clone(), registry.clone(), secrets.clone()).await?;
+        return Ok(());
+    }
+
+    if matches!(subcommand.as_deref(), Some("replay")) {
+        let bundle = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("expected bundle path after `replay`"))?;
+        replay::run(&config, &registry, secrets.clone(), bundle.into()).await?;
         return Ok(());
     }
 
