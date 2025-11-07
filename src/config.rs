@@ -52,6 +52,8 @@ pub struct SecretsConfig {
 pub enum SecretBackend {
     None,
     Vault(VaultConfig),
+    Gcp(GcpConfig),
+    Aws(AwsConfig),
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +61,16 @@ pub struct VaultConfig {
     pub addr: String,
     pub token: String,
     pub namespace: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GcpConfig {
+    pub project: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AwsConfig {
+    pub region: Option<String>,
 }
 
 impl Config {
@@ -307,6 +319,20 @@ fn parse_secret_backend() -> Result<SecretsConfig> {
                 token,
                 namespace,
             })
+        }
+        "gcp" => {
+            let project = env::var("ORLB_GCP_PROJECT")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            SecretBackend::Gcp(GcpConfig { project })
+        }
+        "aws" | "aws_secrets_manager" | "aws-secrets-manager" => {
+            let region = env::var("ORLB_AWS_REGION")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            SecretBackend::Aws(AwsConfig { region })
         }
         other => return Err(anyhow!("unsupported secret backend `{other}`")),
     };

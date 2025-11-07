@@ -80,10 +80,12 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_OTEL_ENDPOINT` | unset | OTLP endpoint when `ORLB_OTEL_EXPORTER=otlp_http` (e.g. `http://collector:4318`) |
 | `ORLB_OTEL_SERVICE_NAME` | `orlb` | Service name attribute attached to emitted spans |
 | `ORLB_TAG_WEIGHTS` | unset | Optional comma-separated multipliers per tag (e.g. `paid=2.0,public=0.6`) |
-| `ORLB_SECRET_BACKEND` | `none` | Secret backend for header values (`none`, `vault`) |
+| `ORLB_SECRET_BACKEND` | `none` | Secret backend for header values (`none`, `vault`, `gcp`, `aws`) |
 | `ORLB_VAULT_ADDR` | unset | Vault base URL when `ORLB_SECRET_BACKEND=vault` |
 | `ORLB_VAULT_TOKEN` | unset | Vault token with read access to referenced secrets |
 | `ORLB_VAULT_NAMESPACE` | unset | Optional Vault namespace header |
+| `ORLB_GCP_PROJECT` | unset | Default GCP project used when `ORLB_SECRET_BACKEND=gcp` and secret references omit the `projects/...` prefix |
+| `ORLB_AWS_REGION` | unset | Optional AWS region override when `ORLB_SECRET_BACKEND=aws` (falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`) |
 
 `providers.json` format:
 ```json
@@ -98,10 +100,16 @@ ORLB is configured via environment variables and a provider registry file:
 Optional headers per provider can be supplied with a `headers` array (`[{ "name": "...", "value": "..." }]`). Tune `weight` and `tags` to bias traffic toward trusted paid tiers while still keeping resilient public RPC coverage. A few additional niceties:
 - Provide `ws_url` when the upstream exposes WebSockets on a different host or path; otherwise ORLB rewrites `https://` to `wss://` automatically.
 - Set `sample_signature` to a known transaction hash so `orlb doctor` can verify archival depth with a `getTransaction` call.
-- Use `vault://mount/path#field` in place of any header value to lazily fetch API keys from HashiCorp Vault (with `ORLB_SECRET_BACKEND=vault` plus the Vault env vars configured). Secrets are requested once, cached in-memory, and injected into outgoing RPC calls without storing plaintext keys in `providers.json`.
+- Use `secret://mount/path#field` in place of any header value to lazily fetch API keys from your configured secret backend. The same syntax works for HashiCorp Vault (`ORLB_SECRET_BACKEND=vault`), Google Secret Manager (`gcp`), and AWS Secrets Manager (`aws`). When a `#field` suffix is provided, the resolved secret is parsed as JSON and the matching field is extracted (Vault always requires a field because its payloads are maps). Secrets are requested once, cached in-memory, and injected into outgoing RPC calls without storing plaintext keys in `providers.json`.
 
 #### Secret manager quick start
 
+All backends share the same `secret://path[#field]` syntax inside `providers.json`:
+- `path` is interpreted per-backend (Vault KV path, GCP secret name, AWS secret ID/ARN). You can optionally append `@version` to pin a specific GCP version number or AWS version stage (defaults to `latest` / `AWSCURRENT`).
+- `#field` (optional) tells ORLB to parse the resolved secret as JSON and return that field. HashiCorp Vault **requires** a field because KV payloads contain multiple keys.
+- Values are fetched once, cached in-memory, and never persisted to disk. The legacy `vault://` scheme is still recognised but `secret://` works across every backend.
+
+##### HashiCorp Vault
 1. **Run Vault locally (optional)** — HashiCorp Vault OSS works fine (`vault server -dev` / docker). Create a secret, e.g.
    ```bash
    vault kv put kv/data/solana paid_rpc_key=super-secret
@@ -114,7 +122,7 @@ Optional headers per provider can be supplied with a `headers` array (`[{ "name"
      "headers": [
        {
          "name": "x-api-key",
-         "value": "vault://kv/data/solana#paid_rpc_key"
+         "value": "secret://kv/data/solana#paid_rpc_key"
        }
      ]
    }
@@ -126,7 +134,51 @@ Optional headers per provider can be supplied with a `headers` array (`[{ "name"
    export ORLB_VAULT_TOKEN=root        # token with read access
    # export ORLB_VAULT_NAMESPACE=team  # only if you use namespaces
    ```
-4. **Start ORLB / run `orlb doctor`:** on the first request, ORLB fetches the referenced secret over HTTPS, caches it in memory, and injects it into outgoing headers. If the secret can’t be read, you’ll see a clear error in the logs/doctor output.
+4. **Start ORLB / run `orlb doctor`:** ORLB fetches the referenced secret over HTTPS on demand. If the secret can’t be read, you’ll see a clear error in the logs/doctor output.
+
+##### Google Secret Manager
+1. **Provide credentials** — point `GOOGLE_APPLICATION_CREDENTIALS` at a service-account JSON, run `gcloud auth application-default login`, or deploy inside GCP so metadata credentials are available.
+2. **Reference the secret:**
+   ```json
+   {
+     "name": "Paid RPC",
+     "headers": [
+       {
+         "name": "x-api-key",
+         "value": "secret://projects/demo/secrets/solana#paid_rpc_key"
+       }
+     ]
+   }
+   ```
+   Shorter `secret://solana#paid_rpc_key` references work when `ORLB_GCP_PROJECT` is set, and `@42` picks version 42 instead of `latest`.
+3. **Export env vars:**
+   ```bash
+   export ORLB_SECRET_BACKEND=gcp
+   # export ORLB_GCP_PROJECT=demo        # optional when references omit projects/... prefix
+   ```
+4. **Start ORLB / run `orlb doctor`:** tokens are minted automatically via `gcp_auth` and cached until expiry.
+
+##### AWS Secrets Manager
+1. **Configure AWS credentials/region** — use `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, an IAM role, or any standard AWS config file. Region resolution follows the normal AWS SDK chain.
+2. **Reference the secret:**
+   ```json
+   {
+     "name": "Paid RPC",
+     "headers": [
+       {
+         "name": "x-api-key",
+         "value": "secret://prod/solana#paid_rpc_key"
+       }
+     ]
+   }
+   ```
+   Append `@AWSPREVIOUS` (or a specific version ID) to target another version stage. Omit `#paid_rpc_key` when the secret value is a raw string instead of JSON.
+3. **Export env vars:**
+   ```bash
+   export ORLB_SECRET_BACKEND=aws
+   # export ORLB_AWS_REGION=us-west-2   # optional when AWS_REGION/AWS_DEFAULT_REGION already set
+   ```
+4. **Start ORLB / run `orlb doctor`:** the AWS SDK signs requests with your configured credentials and caches responses in-memory.
 
 This keeps API keys out of source control while still letting you ship a single `providers.json`.
 
@@ -256,7 +308,7 @@ Set secrets for any private provider headers or API keys. The service is statele
 - ~~Optional secret-manager (Vault/GCP/AWS) integration for provider API keys.~~ ✅
 - Multi-tenant policy engine (per-API-key quotas, method allowlists, billing hooks).
 - Deterministic replay harness that reissues archived request/response pairs across providers to spot divergence.
-- Pluggable secret backends (GCP Secret Manager, AWS Secrets Manager) using the same `secret://` syntax.
+- ~~Pluggable secret backends (GCP Secret Manager, AWS Secrets Manager) using the same `secret://` syntax.~~ ✅
 - Provider marketplace: periodically benchmark latency/cost and auto-adjust weights via policy file.
 
 ## License
