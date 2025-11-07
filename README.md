@@ -25,13 +25,20 @@ ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across 
 ```
 src/
   main.rs              bootstrap (config, tracing, background tasks)
+  commitment.rs        commitment awareness helpers for scoring/providers
   config.rs            env parsing with defaults
   registry.rs          provider registry loader (`providers.json`)
   metrics.rs           Prometheus collectors + dashboard snapshot logic
   forward.rs           reqwest client builder and JSON-RPC forwarding
   health.rs            async probe loop updating provider health
   router.rs            Hyper HTTP server, routing, retry logic, tests
+  ws.rs                WebSocket fan-out server (subscriptions, health)
+  telemetry.rs         OpenTelemetry/tracing initialisation
   dashboard.rs         serves embedded Chart.js dashboard
+  doctor.rs            preflight CLI that probes providers and validates config
+  replay.rs            deterministic replay harness (`orlb replay bundle.json`)
+  secrets.rs           pluggable secret manager (Vault/GCP/AWS), header injection
+  errors.rs            typed error helpers shared across modules
 static/dashboard.html   HTML/JS UI (pulls `/metrics.json` every 5s)
 providers.json          sample provider pool
 Dockerfile              multi-stage build producing minimal image
