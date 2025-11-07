@@ -22,144 +22,154 @@
     </script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   </head>
-  <body class="bg-midnight text-slate-100 min-h-[100vh]">
-    <div class="relative flex min-h-[100vh] flex-col overflow-hidden">
+  <body class="bg-slate-950 text-slate-100 min-h-screen antialiased">
+    <div
+      class="pointer-events-none absolute inset-0 opacity-30"
+      style="
+        background:
+          radial-gradient(circle at 15% 15%, rgba(99, 102, 241, 0.35), transparent 55%),
+          radial-gradient(circle at 85% 20%, rgba(168, 85, 247, 0.25), transparent 55%),
+          radial-gradient(circle at 50% 80%, rgba(14, 165, 233, 0.18), transparent 60%);
+      "
+    ></div>
+    <div class="relative z-10 mx-auto max-w-6xl space-y-8 px-6 py-10">
       <div
-        class="pointer-events-none absolute inset-0 opacity-35"
-        style="
-          background:
-            radial-gradient(circle at top, rgba(99, 102, 241, 0.35), transparent 60%),
-            radial-gradient(circle at right, rgba(168, 85, 247, 0.28), transparent 55%),
-            radial-gradient(circle at bottom left, rgba(14, 165, 233, 0.2), transparent 60%);
-        "
+        id="errorBanner"
+        class="hidden rounded-2xl border border-red-400/30 bg-red-500/10 px-5 py-3 text-sm text-red-200 shadow-lg shadow-red-900/30"
+        role="alert"
       ></div>
 
-      <main class="relative z-10 mx-auto flex min-h-[100vh] w-full max-w-6xl flex-col gap-10 px-6 py-12">
-        <div
-          id="errorBanner"
-          class="hidden rounded-3xl border border-red-400/30 bg-red-500/10 px-6 py-3 text-sm text-red-200 shadow-lg shadow-red-900/30"
-          role="alert"
-        ></div>
-        <header class="rounded-3xl border border-white/10 bg-white/5 px-8 py-10 shadow-xl shadow-aurora/5 backdrop-blur">
-          <div class="flex flex-col gap-6 md:flex-row md:items-center md:justify-between">
+      <header class="rounded-3xl border border-white/10 bg-white/5 px-8 py-10 shadow-2xl shadow-aurora/5 backdrop-blur">
+        <div class="flex flex-col gap-8 lg:flex-row lg:items-start lg:justify-between">
+          <div class="space-y-5">
             <div class="flex items-center gap-4">
               <img src="/aurflow.png" alt="AurFlow logo" class="h-12 w-12 rounded-full border border-white/20 bg-white/80" />
-              <p class="text-sm uppercase tracking-[0.3em] text-slate-400">Open RPC Load Balancer</p>
-              <h1 class="mt-2 text-3xl font-semibold md:text-4xl">Provider Command Console</h1>
-              <p class="mt-3 max-w-xl text-sm text-slate-400">
-                Inspect live RPC health, route scores, and probe history at a glance. Snapshots auto refresh every 5 seconds; tap the button any time you want an instant update.
-              </p>
-            </div>
-            <div class="flex flex-col items-end gap-3 text-right">
-              <button
-                id="refreshButton"
-                type="button"
-                class="inline-flex items-center gap-3 rounded-full bg-aurora px-6 py-2.5 text-sm font-semibold text-white shadow-lg shadow-aurora/30 transition hover:translate-y-0.5 hover:bg-auroraLight focus:outline-none focus:ring-2 focus:ring-aurora/60"
-              >
-                <span class="inline-flex h-2.5 w-2.5 items-center justify-center rounded-full bg-white/80 shadow-inner shadow-white/40"></span>
-                <span>Refresh snapshot</span>
-              </button>
-              <div class="flex items-center gap-2 text-xs text-slate-300">
-                <label
-                  for="autoRefreshToggle"
-                  class="inline-flex items-center gap-2 rounded-full border border-white/10 bg-slate-900/70 px-3 py-1 shadow-inner shadow-black/40 transition hover:border-white/20"
-                >
-                  <input
-                    id="autoRefreshToggle"
-                    type="checkbox"
-                    class="h-4 w-4 rounded border-white/30 bg-slate-900/60 text-aurora focus:ring-aurora/60"
-                    checked
-                  />
-                  <span class="font-medium uppercase tracking-[0.2em] text-slate-400">Auto</span>
-                </label>
-                <span id="autoRefreshStatus" class="rounded-full border border-white/10 bg-white/10 px-2 py-1 font-medium tracking-wide text-slate-300" aria-live="polite">
-                  Next in 5s
-                </span>
+              <div>
+                <p class="text-xs uppercase tracking-[0.35em] text-slate-400">Open RPC Load Balancer</p>
+                <h1 class="text-3xl font-semibold leading-tight text-white md:text-4xl">Provider Control Room</h1>
               </div>
             </div>
-          </div>
-
-          <dl class="mt-8 grid gap-5 sm:grid-cols-3">
-            <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-inner shadow-white/5">
-              <dt class="text-xs uppercase tracking-[0.2em] text-slate-400">Providers Online</dt>
-              <dd class="mt-3 text-3xl font-semibold" id="providerCount">--</dd>
-              <p class="mt-1 text-xs text-slate-400" id="healthyCount">--</p>
-            </div>
-            <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-inner shadow-white/5">
-              <dt class="text-xs uppercase tracking-[0.2em] text-slate-400">Average Latency</dt>
-              <dd class="mt-3 text-3xl font-semibold" id="avgLatency">--</dd>
-              <p class="mt-1 text-xs text-slate-400" id="latencyDetail">--</p>
-            </div>
-            <div class="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-inner shadow-white/5">
-              <dt class="text-xs uppercase tracking-[0.2em] text-slate-400">Last Updated</dt>
-              <dd class="mt-3 text-3xl font-semibold" id="lastUpdated">--</dd>
-              <p class="mt-1 text-xs text-slate-400" id="updatedAgo">--</p>
-            </div>
-          </dl>
-        </header>
-
-        <section class="rounded-3xl border border-white/10 bg-white/5 p-8 backdrop-blur">
-          <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-            <div>
-              <h2 class="text-xl font-semibold">Latency & Scoreboard</h2>
-              <p class="text-sm text-slate-400">
-                Compare providers side-by-side. Lower scores indicate stronger candidates for routing while accounting for latency and previous errors.
-              </p>
-            </div>
-            <div
-              id="metricToggle"
-              class="inline-flex items-center gap-1 rounded-full border border-white/15 bg-slate-900/70 p-1 text-xs font-medium text-slate-300 shadow-inner shadow-black/40"
-              role="group"
-            >
-              <button
-                type="button"
-                class="metric-toggle inline-flex items-center gap-2 rounded-full px-4 py-2 text-slate-300 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-aurora/60"
-                data-metric="latency"
-              >
-                Live Latency
-              </button>
-              <button
-                type="button"
-                class="metric-toggle inline-flex items-center gap-2 rounded-full px-4 py-2 text-slate-300 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-aurora/60"
-                data-metric="latency_ema"
-              >
-                Latency EMA
-              </button>
-              <button
-                type="button"
-                class="metric-toggle inline-flex items-center gap-2 rounded-full px-4 py-2 text-slate-300 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-aurora/60"
-                data-metric="score"
-              >
-                Weighted Score
-              </button>
-            </div>
-          </div>
-          <div class="mt-6 h-72 rounded-2xl border border-white/10 bg-white/5 p-4">
-            <canvas id="latencyChart"></canvas>
-          </div>
-        </section>
-
-        <section class="space-y-6">
-          <div>
-            <h2 class="text-xl font-semibold">Provider Deep Dive</h2>
-            <p class="text-sm text-slate-400">
-              Hover each card to view detailed stats, weights, error streaks, and last observed slot height. Cards stay put until you refresh.
+            <p class="max-w-3xl text-sm leading-relaxed text-slate-300">
+              Track routing health, slot freshness, and weighted scores in real time. Refresh manually or let AurFlow stream new snapshots every few seconds while you keep an eye on upcoming hedges, quarantines, and weight overrides.
             </p>
+            <div class="flex flex-wrap gap-2 text-[0.65rem] uppercase tracking-[0.4em] text-slate-400">
+              <span class="rounded-full border border-white/10 px-3 py-1">Live snapshot</span>
+              <span class="rounded-full border border-white/10 px-3 py-1">Latency &amp; score</span>
+              <span class="rounded-full border border-white/10 px-3 py-1">Slot health</span>
+            </div>
           </div>
+          <div class="w-full max-w-sm rounded-2xl border border-white/10 bg-slate-950/60 p-5 shadow-inner shadow-black/40">
+            <p class="text-xs uppercase tracking-[0.4em] text-slate-500">Controls</p>
+            <button
+              id="refreshButton"
+              type="button"
+              class="mt-3 inline-flex w-full items-center justify-center gap-3 rounded-2xl bg-aurora px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-aurora/30 transition hover:-translate-y-0.5 hover:bg-auroraLight focus:outline-none focus-visible:ring-2 focus-visible:ring-aurora/60"
+            >
+              <span class="inline-flex h-2 w-2 items-center justify-center rounded-full bg-white/80 shadow-inner shadow-white/60"></span>
+              <span>Refresh snapshot</span>
+            </button>
+            <p class="mt-4 text-xs text-slate-400">Snapshots auto-refresh every five seconds when Auto is enabled.</p>
+            <div class="mt-4 flex items-center justify-between gap-3 text-xs text-slate-300">
+              <label
+                for="autoRefreshToggle"
+                class="inline-flex items-center gap-2 rounded-full border border-white/15 bg-slate-900/60 px-3 py-1.5 shadow-inner shadow-black/40"
+              >
+                <input
+                  id="autoRefreshToggle"
+                  type="checkbox"
+                  class="h-4 w-4 rounded border-white/30 bg-slate-900/60 text-aurora focus:ring-aurora/60"
+                  checked
+                />
+                <span class="font-semibold uppercase tracking-[0.3em] text-slate-300">Auto</span>
+              </label>
+              <span
+                id="autoRefreshStatus"
+                class="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs font-semibold text-slate-200"
+                aria-live="polite"
+              >
+                Next in 5s
+              </span>
+            </div>
+          </div>
+        </div>
+      </header>
 
-          <div
-            id="providerCards"
-            class="grid gap-6 sm:grid-cols-2 xl:grid-cols-3"
-          ></div>
-        </section>
-      </main>
-    </div>
+      <section aria-label="Snapshot metrics" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <article class="rounded-2xl border border-white/10 bg-slate-950/60 p-5 shadow-inner shadow-black/30">
+          <p class="text-xs uppercase tracking-[0.35em] text-slate-400">Providers Online</p>
+          <p class="mt-3 text-3xl font-semibold text-white" id="providerCount">--</p>
+          <p class="mt-1 text-xs text-slate-400" id="healthyCount">--</p>
+        </article>
+        <article class="rounded-2xl border border-white/10 bg-slate-950/60 p-5 shadow-inner shadow-black/30">
+          <p class="text-xs uppercase tracking-[0.35em] text-slate-400">Average Latency</p>
+          <p class="mt-3 text-3xl font-semibold text-white" id="avgLatency">--</p>
+          <p class="mt-1 text-xs text-slate-400" id="latencyDetail">--</p>
+        </article>
+        <article class="rounded-2xl border border-white/10 bg-slate-950/60 p-5 shadow-inner shadow-black/30">
+          <p class="text-xs uppercase tracking-[0.35em] text-slate-400">Last Updated</p>
+          <p class="mt-3 text-3xl font-semibold text-white" id="lastUpdated">--</p>
+          <p class="mt-1 text-xs text-slate-400" id="updatedAgo">--</p>
+        </article>
+      </section>
 
-    <template id="providerCardTemplate">
-      <article class="group relative overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-white/10 via-white/5 to-transparent p-6 backdrop-blur transition hover:border-white/30 hover:shadow-2xl hover:shadow-aurora/10">
-        <div class="flex items-start justify-between gap-3">
+      <section class="rounded-3xl border border-white/10 bg-white/5 px-6 py-8 backdrop-blur">
+        <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <h3 class="text-lg font-semibold"></h3>
+            <h2 class="text-xl font-semibold text-white">Latency &amp; Scoreboard</h2>
+            <p class="text-sm text-slate-400">Compare providers side-by-side. Lower weighted scores represent healthier routing choices.</p>
+          </div>
+          <div
+            id="metricToggle"
+            class="inline-flex items-center gap-1 rounded-full border border-white/15 bg-slate-900/70 p-1 text-xs font-medium text-slate-300 shadow-inner shadow-black/40"
+            role="group"
+          >
+            <button
+              type="button"
+              class="metric-toggle inline-flex items-center gap-2 rounded-full px-4 py-2 text-slate-300 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-aurora/60"
+              data-metric="latency"
+            >
+              Live Latency
+            </button>
+            <button
+              type="button"
+              class="metric-toggle inline-flex items-center gap-2 rounded-full px-4 py-2 text-slate-300 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-aurora/60"
+              data-metric="latency_ema"
+            >
+              EMA Latency
+            </button>
+            <button
+              type="button"
+              class="metric-toggle inline-flex items-center gap-2 rounded-full px-4 py-2 text-slate-300 transition focus:outline-none focus-visible:ring-2 focus-visible:ring-aurora/60"
+              data-metric="score"
+            >
+              Weighted Score
+            </button>
+          </div>
+        </div>
+        <div class="mt-6 h-80 rounded-2xl border border-white/10 bg-slate-950/50 p-4">
+          <canvas id="latencyChart"></canvas>
+        </div>
+      </section>
+
+      <section class="space-y-4 pb-12">
+        <div class="flex flex-col gap-2 md:flex-row md:items-baseline md:justify-between">
+          <div>
+            <h2 class="text-xl font-semibold text-white">Provider Deep Dive</h2>
+            <p class="text-sm text-slate-400">Hover cards for detail. Metrics blend live routing stats, health probes, and commitment freshness.</p>
+          </div>
+          <p class="text-xs uppercase tracking-[0.35em] text-slate-400">Data refreshes every 5s</p>
+        </div>
+        <div
+          id="providerCards"
+          class="grid gap-6 sm:grid-cols-2 xl:grid-cols-3"
+        ></div>
+      </section>
+    </div>
+<template id="providerCardTemplate">
+      <article class="group relative overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 p-6 shadow-lg shadow-black/40 transition duration-300 hover:border-aurora/40 hover:shadow-aurora/30">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h3 class="text-lg font-semibold text-white"></h3>
             <p class="text-sm text-slate-400"></p>
           </div>
           <span class="flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold">
@@ -170,51 +180,50 @@
         <dl class="mt-6 space-y-3 text-sm">
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Latency</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">EMA (ms)</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Success / Errors</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Probe Pass / Fail</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Weighted Score</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Effective Weight</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Tags</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Last Slot</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Slot Lag</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
           <div class="flex items-center justify-between gap-3">
             <dt class="text-slate-400">Last Seen</dt>
-            <dd class="font-medium"></dd>
+            <dd class="font-medium text-white"></dd>
           </div>
         </dl>
         <div class="mt-6 flex items-center justify-between text-xs text-slate-400">
-          <span class="inline-flex items-center gap-2">
-            <span class="rounded-full bg-white/10 px-3 py-1 font-medium text-white/80"></span>
-          </span>
-          <span class="uppercase tracking-[0.2em]"></span>
+          <span class="inline-flex items-center gap-2 rounded-full bg-white/5 px-3 py-1 font-medium text-white/80"></span>
+          <span class="uppercase tracking-[0.3em]"></span>
         </div>
+        <div class="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-white/10 to-transparent opacity-0 transition duration-300 group-hover:opacity-100"></div>
       </article>
     </template>
 
