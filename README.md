@@ -20,6 +20,7 @@ ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across 
 - **Observability** - `/metrics` (Prometheus text) and `/metrics.json` plus `/dashboard` (Chart.js) showing live scores.
 - **Doctor CLI** - `orlb doctor` lints the registry, validates headers, and probes each upstream before you deploy.
 - **Simple ops** - single binary with embedded dashboard, configurable via env vars, ships with Dockerfile and CI.
+- **Hot reloads** - `/admin/providers` swaps in new provider registries without restarting and can optionally persist to `providers.json`.
 
 ## Project Layout
 ```
@@ -243,6 +244,10 @@ Enable `ORLB_HEDGE_REQUESTS=true` to let ORLB fire a backup provider when the pr
 - `GET /metrics`   Prometheus text format metrics (`orlb_requests_total`, `orlb_provider_latency_ms`, etc.), auto-refreshing every 5 seconds in a browser tab.
 - `GET /metrics.json`   JSON snapshot powering the dashboard.
 - `GET /dashboard`   live Chart.js UI summarising provider health.
+- `GET /admin/providers`   Normalised provider registry snapshot (same shape as `providers.json`) for quick inspection or backups.
+- `POST /admin/providers`   Hot-reloads the provider registry from a JSON array or `{ "providers": [...] }` envelope. Include `"persist": true` to rewrite `providers.json` after a successful validation.
+
+The admin `POST` endpoint validates headers, normalises tags, and immediately propagates the new registry to routing, health probes, and WebSocket fan-outs. Payloads follow the same schema as `providers.json`, so you can copy/paste that file or send only the providers array; optional persistence lets you stage temporary failover tables without touching disk.
 
 ### Metrics Highlights
 - `orlb_requests_total{provider,method,status}`   counts per upstream and outcome.
@@ -347,6 +352,11 @@ Set secrets for any private provider headers or API keys. The service is statele
 - ~~Deterministic replay harness that reissues archived request/response pairs across providers to spot divergence.~~ ✅
 - ~~Pluggable secret backends (GCP Secret Manager, AWS Secrets Manager) using the same `secret://` syntax.~~ ✅
 - Provider marketplace: periodically benchmark latency/cost and auto-adjust weights via policy file.
+- ~~Hot-reloadable registry updates via `/admin/providers` so weights and new RPC endpoints can be applied without restarting.~~ ✅.
+- Real-time provider reputation scoring that persists latency/error history to disk and cold-starts weights based on prior runs.
+- Dynamic congestion control that taps into TPU leader schedules to anticipate RPC surges and pre-emptively hedge.
+- Snapshotting `/metrics.json` into object storage for longer-term analytics without running a full Prometheus stack.
+- Managed egress relays that keep provider connections warm across multiple geographic PoPs to minimize TLS/handshake overhead.
 
 ## License
 Apache 2.0 (or adapt as needed). Feel free to fork and extend for demos or production load-balancing.

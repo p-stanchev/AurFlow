@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::commitment::Commitment;
 use crate::config::Config;
-use crate::registry::{Provider, Registry};
+use crate::registry::{Provider, Registry, SharedRegistry};
 
 static TEXT_ENCODER: Lazy<TextEncoder> = Lazy::new(TextEncoder::new);
 
@@ -65,7 +65,7 @@ impl CommitmentSlots {
 
 #[derive(Clone)]
 pub struct Metrics {
-    registry: Registry,
+    registry: SharedRegistry,
     request_counter: IntCounterVec,
     request_failures: IntCounterVec,
     retries: IntCounterVec,
@@ -166,7 +166,9 @@ pub struct DashboardSnapshot {
 }
 
 impl Metrics {
-    pub fn new(registry: Registry, config: &Config) -> Result<Self> {
+    pub fn new(registry: SharedRegistry, config: &Config) -> Result<Self> {
+        let registry_snapshot = registry.snapshot();
+        let providers = registry_snapshot.providers();
         let prometheus_registry = PromRegistry::new_custom(Some("orlb".into()), None)?;
 
         let request_counter = IntCounterVec::new(
@@ -267,7 +269,7 @@ impl Metrics {
         prometheus_registry.register(Box::new(slo_provider_error_rate.clone()))?;
 
         let mut initial_state = HashMap::new();
-        for provider in registry.providers() {
+        for provider in providers {
             provider_health
                 .with_label_values(&[provider.name.as_str()])
                 .set(1);
@@ -522,7 +524,8 @@ impl Metrics {
 
     pub async fn provider_ranked_list(&self, commitment: Commitment) -> Vec<(Provider, f64, bool)> {
         let state = self.state.read().await;
-        let providers = self.registry.providers();
+        let registry = self.registry.snapshot();
+        let providers = registry.providers();
         if providers.is_empty() {
             return Vec::new();
         }
@@ -614,6 +617,7 @@ impl Metrics {
     pub async fn dashboard_snapshot(&self) -> DashboardSnapshot {
         let state = self.state.read().await;
         let now = SystemTime::now();
+        let registry = self.registry.snapshot();
 
         let best_slots: HashMap<Commitment, u64> = Commitment::ALL
             .iter()
@@ -639,8 +643,7 @@ impl Metrics {
         let cluster_skew = best_finalized.saturating_sub(min_finalized)
             > alert_base.saturating_mul(MULTI_CLUSTER_SPREAD_MULTIPLIER);
 
-        let mut providers: Vec<_> = self
-            .registry
+        let mut providers: Vec<_> = registry
             .providers()
             .iter()
             .map(|provider| {
@@ -787,8 +790,51 @@ impl Metrics {
         self.hedge_outcomes.with_label_values(&[outcome]).inc();
     }
 
-    pub fn registry(&self) -> Registry {
-        self.registry.clone()
+    pub async fn reload_registry(&self, registry: Registry) {
+        let providers_vec = registry.providers().to_vec();
+        let provider_names: HashSet<String> =
+            providers_vec.iter().map(|p| p.name.clone()).collect();
+        self.registry.replace(registry);
+
+        {
+            let mut guard = self.state.write().await;
+            guard.retain(|name, _| provider_names.contains(name));
+            for name in provider_names.iter() {
+                guard.entry(name.clone()).or_insert_with(ProviderState::new);
+            }
+        }
+
+        {
+            let mut trackers = self.provider_slo_trackers.lock().await;
+            trackers.retain(|name, _| provider_names.contains(name));
+            for name in provider_names.iter() {
+                trackers
+                    .entry(name.clone())
+                    .or_insert_with(|| SloTracker::new(self.slo_target));
+            }
+        }
+
+        for provider in providers_vec {
+            self.provider_health
+                .with_label_values(&[provider.name.as_str()])
+                .set(1);
+            self.provider_latency
+                .with_label_values(&[provider.name.as_str()])
+                .set(FALLBACK_LATENCY_MS);
+            for commitment in Commitment::ALL {
+                self.provider_slot
+                    .with_label_values(&[provider.name.as_str(), commitment.as_str()])
+                    .set(0.0);
+            }
+            for (label, _) in SLO_WINDOWS {
+                self.slo_provider_availability
+                    .with_label_values(&[provider.name.as_str(), *label])
+                    .set(1.0);
+                self.slo_provider_error_rate
+                    .with_label_values(&[provider.name.as_str(), *label])
+                    .set(0.0);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1213,7 +1259,8 @@ mod tests {
         ])
         .unwrap();
         let config = test_config();
-        let metrics = Metrics::new(registry, &config).unwrap();
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry, &config).unwrap();
 
         metrics
             .record_health_success(
@@ -1255,7 +1302,8 @@ mod tests {
         let registry =
             Registry::from_providers(vec![provider("Solo", "https://solo.example.com")]).unwrap();
         let config = test_config();
-        let metrics = Metrics::new(registry, &config).unwrap();
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry, &config).unwrap();
 
         metrics
             .record_request_success("Solo", "getSlot", Duration::from_millis(25))
@@ -1297,7 +1345,8 @@ mod tests {
         ])
         .unwrap();
         let config = test_config();
-        let metrics = Metrics::new(registry, &config).unwrap();
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry, &config).unwrap();
 
         metrics
             .record_health_success(
@@ -1356,7 +1405,8 @@ mod tests {
             },
         ])
         .unwrap();
-        let metrics = Metrics::new(registry, &config).unwrap();
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry, &config).unwrap();
 
         let slots = CommitmentSlots::from_slot(Commitment::Finalized, Some(1_500));
         metrics
@@ -1396,7 +1446,8 @@ mod tests {
         ])
         .unwrap();
         let config = test_config();
-        let metrics = Metrics::new(registry, &config).unwrap();
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry, &config).unwrap();
 
         metrics
             .test_override_provider_state("Slow", 220.0, 0, 10)
@@ -1427,7 +1478,8 @@ mod tests {
         let registry =
             Registry::from_providers(vec![provider("Flaky", "https://flaky.example.com")]).unwrap();
         let config = test_config();
-        let metrics = Metrics::new(registry, &config).unwrap();
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry, &config).unwrap();
 
         metrics
             .test_override_provider_state("Flaky", 120.0, 0, 10)

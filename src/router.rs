@@ -1,10 +1,12 @@
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::convert::Infallible;
+use std::fs;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use hyper::body::to_bytes;
 use hyper::header::{HeaderName, HeaderValue, ALLOW, CONTENT_TYPE};
@@ -12,6 +14,7 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use once_cell::sync::Lazy;
 use reqwest::Client;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::signal;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -25,7 +28,7 @@ use crate::dashboard;
 use crate::errors::OrlbError;
 use crate::forward;
 use crate::metrics::Metrics;
-use crate::registry::Provider;
+use crate::registry::{Provider, Registry, SharedRegistry};
 use crate::secrets::SecretManager;
 use crate::ws;
 
@@ -35,6 +38,37 @@ const METRICS_PATH: &str = "/metrics";
 const METRICS_JSON_PATH: &str = "/metrics.json";
 const RPC_PATH: &str = "/rpc";
 const WS_PATH: &str = "/ws";
+const ADMIN_PROVIDERS_PATH: &str = "/admin/providers";
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ProviderUpdateInput {
+    Envelope {
+        providers: Vec<Provider>,
+        #[serde(default)]
+        persist: bool,
+    },
+    List(Vec<Provider>),
+}
+
+impl ProviderUpdateInput {
+    fn into_payload(self) -> ProviderUpdatePayload {
+        match self {
+            ProviderUpdateInput::Envelope { providers, persist } => {
+                ProviderUpdatePayload { providers, persist }
+            }
+            ProviderUpdateInput::List(providers) => ProviderUpdatePayload {
+                providers,
+                persist: false,
+            },
+        }
+    }
+}
+
+struct ProviderUpdatePayload {
+    providers: Vec<Provider>,
+    persist: bool,
+}
 
 static MUTATING_METHODS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
     [
@@ -59,48 +93,71 @@ pub(crate) struct AppState {
     pub(crate) client: Client,
     concurrency: ProviderConcurrency,
     pub(crate) secrets: SecretManager,
+    pub(crate) registry: SharedRegistry,
 }
 
 #[derive(Clone)]
 struct ProviderConcurrency {
-    limits: Arc<HashMap<String, Arc<Semaphore>>>,
+    limits: Arc<RwLock<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl ProviderConcurrency {
     fn new(providers: &[Provider]) -> Self {
-        let mut limits = HashMap::with_capacity(providers.len());
-        for provider in providers {
-            let base = usize::from(provider.weight.max(1));
-            let permits = (base * 4).max(1);
-            limits.insert(provider.name.clone(), Arc::new(Semaphore::new(permits)));
-        }
         Self {
-            limits: Arc::new(limits),
+            limits: Arc::new(RwLock::new(Self::build_map(providers))),
         }
     }
 
+    fn build_map(providers: &[Provider]) -> HashMap<String, Arc<Semaphore>> {
+        let mut limits = HashMap::with_capacity(providers.len());
+        for provider in providers {
+            limits.insert(
+                provider.name.clone(),
+                Arc::new(Semaphore::new(Self::permits_for(provider))),
+            );
+        }
+        limits
+    }
+
+    fn permits_for(provider: &Provider) -> usize {
+        let base = usize::from(provider.weight.max(1));
+        (base * 4).max(1)
+    }
+
+    fn reload(&self, providers: &[Provider]) {
+        let mut guard = self
+            .limits
+            .write()
+            .expect("provider concurrency lock poisoned");
+        *guard = Self::build_map(providers);
+    }
+
     async fn acquire(&self, provider_name: &str) -> OwnedSemaphorePermit {
-        self.limits
-            .get(provider_name)
-            .expect("missing semaphore for provider")
-            .clone()
-            .acquire_owned()
-            .await
-            .expect("semaphore closed")
+        let semaphore = {
+            let guard = self
+                .limits
+                .read()
+                .expect("provider concurrency lock poisoned");
+            guard.get(provider_name).cloned()
+        }
+        .expect("missing semaphore for provider");
+        semaphore.acquire_owned().await.expect("semaphore closed")
     }
 }
 
 pub async fn start_server(
     config: Config,
+    registry: SharedRegistry,
     metrics: Metrics,
     client: Client,
     secrets: SecretManager,
 ) -> Result<()> {
     let listen_addr = config.listen_addr;
-    let provider_registry = metrics.registry();
+    let provider_registry = registry.snapshot();
     let concurrency = ProviderConcurrency::new(provider_registry.providers());
     let state = Arc::new(AppState {
         config,
+        registry,
         metrics,
         client,
         concurrency,
@@ -137,6 +194,8 @@ async fn route(req: Request<Body>, state: Arc<AppState>) -> Response<Body> {
         (&Method::GET, METRICS_PATH) => handle_metrics(&state).await,
         (&Method::GET, METRICS_JSON_PATH) => handle_metrics_json(&state).await,
         (&Method::GET, WS_PATH) => ws::handle(req, state).await,
+        (&Method::GET, ADMIN_PROVIDERS_PATH) => handle_admin_providers_get(&state),
+        (&Method::POST, ADMIN_PROVIDERS_PATH) => handle_admin_providers_post(req, state).await,
         (&Method::GET, DASHBOARD_PATH) | (&Method::GET, "/") => {
             match dashboard::serve(&state.config) {
                 Ok(response) => response,
@@ -573,6 +632,107 @@ async fn handle_metrics_json(state: &AppState) -> Response<Body> {
     }
 }
 
+fn handle_admin_providers_get(state: &Arc<AppState>) -> Response<Body> {
+    let snapshot = state.registry.snapshot();
+    match serde_json::to_vec_pretty(snapshot.providers()) {
+        Ok(body) => Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+        Err(err) => {
+            tracing::error!(error = ?err, "failed to serialize registry snapshot");
+            internal_server_error()
+        }
+    }
+}
+
+async fn handle_admin_providers_post(req: Request<Body>, state: Arc<AppState>) -> Response<Body> {
+    let body = match to_bytes(req.into_body()).await {
+        Ok(bytes) => {
+            if bytes.len() > MAX_PAYLOAD_BYTES {
+                return bad_request("payload exceeds maximum size");
+            }
+            bytes
+        }
+        Err(err) => {
+            tracing::warn!(error = ?err, "failed to read admin payload");
+            return bad_request("unable to read request body");
+        }
+    };
+
+    let payload = match serde_json::from_slice::<ProviderUpdateInput>(&body) {
+        Ok(value) => value.into_payload(),
+        Err(err) => {
+            tracing::warn!(error = ?err, "invalid provider update payload");
+            return bad_request("invalid provider payload");
+        }
+    };
+
+    if payload.providers.is_empty() {
+        return bad_request("provider list cannot be empty");
+    }
+
+    let registry = match Registry::from_providers(payload.providers) {
+        Ok(registry) => registry,
+        Err(err) => {
+            tracing::warn!(error = ?err, "failed to parse provider registry");
+            return bad_request(&format!("invalid provider registry: {err}"));
+        }
+    };
+
+    if payload.persist {
+        if let Err(err) = persist_registry_to_disk(state.config.providers_path.as_path(), &registry)
+        {
+            tracing::error!(error = ?err, "failed to persist provider registry");
+            return internal_server_error();
+        }
+    }
+
+    let provider_count = registry.len();
+    state.concurrency.reload(registry.providers());
+    state.metrics.reload_registry(registry).await;
+
+    respond_with_json(
+        StatusCode::OK,
+        json!({
+            "providers": provider_count,
+            "persisted": payload.persist
+        }),
+    )
+}
+
+fn bad_request(message: &str) -> Response<Body> {
+    respond_with_json(
+        StatusCode::BAD_REQUEST,
+        json!({
+            "error": message
+        }),
+    )
+}
+
+fn respond_with_json(status: StatusCode, payload: Value) -> Response<Body> {
+    match serde_json::to_vec(&payload) {
+        Ok(body) => Response::builder()
+            .status(status)
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap(),
+        Err(err) => {
+            tracing::error!(error = ?err, "failed to serialize admin response");
+            internal_server_error()
+        }
+    }
+}
+
+fn persist_registry_to_disk(path: &Path, registry: &Registry) -> Result<()> {
+    let json =
+        serde_json::to_vec_pretty(registry.providers()).context("serializing provider registry")?;
+    fs::write(path, json)
+        .with_context(|| format!("failed to write provider registry to {}", path.display()))?;
+    Ok(())
+}
+
 fn build_upstream_response(
     status: StatusCode,
     headers: &reqwest::header::HeaderMap,
@@ -810,7 +970,7 @@ mod tests {
     use crate::config::{Config, OtelConfig, OtelExporter, SecretBackend, SecretsConfig};
     use crate::forward::build_http_client;
     use crate::metrics::CommitmentSlots;
-    use crate::registry::{Provider, Registry};
+    use crate::registry::{Provider, Registry, SharedRegistry};
     use crate::secrets::SecretManager;
 
     fn test_config() -> Config {
@@ -846,14 +1006,16 @@ mod tests {
 
     async fn build_state_with_config(providers: Vec<Provider>, config: Config) -> Arc<AppState> {
         let registry = Registry::from_providers(providers).unwrap();
-        let metrics = Metrics::new(registry, &config).unwrap();
-        let provider_registry = metrics.registry();
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry.clone(), &config).unwrap();
+        let provider_registry = shared_registry.snapshot();
         let concurrency = ProviderConcurrency::new(provider_registry.providers());
         let client = build_http_client(Duration::from_secs(5)).unwrap();
         let secrets = SecretManager::new(&config.secrets).unwrap();
 
         Arc::new(AppState {
             config,
+            registry: shared_registry,
             metrics,
             client,
             concurrency,

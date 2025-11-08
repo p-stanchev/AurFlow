@@ -10,13 +10,13 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::commitment::Commitment;
 use crate::forward;
 use crate::metrics::{CommitmentSlots, Metrics};
-use crate::registry::{Provider, Registry};
+use crate::registry::{Provider, SharedRegistry};
 use crate::secrets::SecretManager;
 
 const HEALTH_METHOD: &str = "getSlot";
 
 pub async fn run(
-    registry: Registry,
+    registry: SharedRegistry,
     metrics: Metrics,
     client: Client,
     probe_interval: Duration,
@@ -39,7 +39,8 @@ pub async fn run(
         ticker.tick().await;
         let mut tasks = JoinSet::new();
 
-        for provider in registry.providers().iter().cloned() {
+        let snapshot = registry.snapshot();
+        for provider in snapshot.providers().iter().cloned() {
             let payload = payload_bytes.clone();
             let client = client.clone();
             let metrics = metrics.clone();

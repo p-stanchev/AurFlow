@@ -3,12 +3,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use arc_swap::ArcSwap;
 use reqwest::header::{HeaderName, HeaderValue};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::secrets::{parse_secret_reference, SecretReference};
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Provider {
     pub name: String,
     pub url: String,
@@ -26,7 +27,7 @@ pub struct Provider {
     pub parsed_headers: Option<Arc<Vec<ParsedHeader>>>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Header {
     pub name: String,
     pub value: String,
@@ -60,7 +61,6 @@ impl Registry {
         })
     }
 
-    #[cfg(test)]
     pub fn from_providers(providers: Vec<Provider>) -> Result<Self> {
         if providers.is_empty() {
             bail!("provider registry cannot be empty");
@@ -163,4 +163,25 @@ pub struct ParsedHeader {
 pub enum HeaderValueKind {
     Static(HeaderValue),
     Secret(SecretReference),
+}
+
+#[derive(Clone)]
+pub struct SharedRegistry {
+    inner: Arc<ArcSwap<Registry>>,
+}
+
+impl SharedRegistry {
+    pub fn new(registry: Registry) -> Self {
+        Self {
+            inner: Arc::new(ArcSwap::from_pointee(registry)),
+        }
+    }
+
+    pub fn snapshot(&self) -> Registry {
+        self.inner.load().as_ref().clone()
+    }
+
+    pub fn replace(&self, registry: Registry) {
+        self.inner.store(Arc::new(registry));
+    }
 }

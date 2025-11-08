@@ -18,7 +18,7 @@ use anyhow::Result;
 use crate::config::Config;
 use crate::forward::build_http_client;
 use crate::metrics::Metrics;
-use crate::registry::Registry;
+use crate::registry::{Registry, SharedRegistry};
 use crate::secrets::SecretManager;
 
 #[tokio::main]
@@ -31,9 +31,10 @@ async fn main() -> Result<()> {
     let _telemetry = telemetry::init(&config)?;
     let secrets = SecretManager::new(&config.secrets)?;
     let registry = Registry::load(&config.providers_path)?;
+    let shared_registry = SharedRegistry::new(registry);
 
     if matches!(subcommand.as_deref(), Some("doctor")) {
-        doctor::run(config.clone(), registry.clone(), secrets.clone()).await?;
+        doctor::run(config.clone(), shared_registry.snapshot(), secrets.clone()).await?;
         return Ok(());
     }
 
@@ -41,20 +42,21 @@ async fn main() -> Result<()> {
         let bundle = args
             .next()
             .ok_or_else(|| anyhow::anyhow!("expected bundle path after `replay`"))?;
-        replay::run(&config, &registry, secrets.clone(), bundle.into()).await?;
+        let snapshot = shared_registry.snapshot();
+        replay::run(&config, &snapshot, secrets.clone(), bundle.into()).await?;
         return Ok(());
     }
 
     tracing::info!(
         listen_addr = %config.listen_addr,
-        providers = registry.len(),
+        providers = shared_registry.snapshot().len(),
         "starting ORLB"
     );
 
-    let metrics = Metrics::new(registry.clone(), &config)?;
+    let metrics = Metrics::new(shared_registry.clone(), &config)?;
     let client = build_http_client(config.request_timeout)?;
 
-    let health_registry = registry.clone();
+    let health_registry = shared_registry.clone();
     let health_metrics = metrics.clone();
     let health_client = client.clone();
     let probe_interval = config.probe_interval;
@@ -75,5 +77,5 @@ async fn main() -> Result<()> {
         .await;
     });
 
-    router::start_server(config, metrics, client, secrets).await
+    router::start_server(config, shared_registry, metrics, client, secrets).await
 }
