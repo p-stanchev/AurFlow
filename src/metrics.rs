@@ -31,6 +31,8 @@ const SLO_WINDOWS: &[(&str, Duration)] = &[
     ("2h", Duration::from_secs(7200)),
 ];
 const MULTI_CLUSTER_SPREAD_MULTIPLIER: u64 = 1000;
+const ANOMALY_LATENCY_REASON: &str = "anomaly_latency";
+const ANOMALY_ERROR_REASON: &str = "anomaly_error";
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct CommitmentSlots {
@@ -63,6 +65,43 @@ impl CommitmentSlots {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct AnomalyConfig {
+    latency_z: f64,
+    error_z: f64,
+    min_providers: usize,
+    min_requests: u64,
+    quarantine_duration: Duration,
+}
+
+impl AnomalyConfig {
+    fn from_config(config: &Config) -> Self {
+        Self {
+            latency_z: config.anomaly_latency_z.max(0.0),
+            error_z: config.anomaly_error_z.max(0.0),
+            min_providers: config.anomaly_min_providers.max(2),
+            min_requests: config.anomaly_min_requests,
+            quarantine_duration: Duration::from_secs(config.anomaly_quarantine_secs),
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.latency_enabled() || self.error_enabled()
+    }
+
+    fn latency_enabled(&self) -> bool {
+        self.latency_z > 0.0
+    }
+
+    fn error_enabled(&self) -> bool {
+        self.error_z > 0.0
+    }
+
+    fn min_participants(&self) -> usize {
+        self.min_providers.max(2)
+    }
+}
+
 #[derive(Clone)]
 pub struct Metrics {
     registry: SharedRegistry,
@@ -91,6 +130,7 @@ pub struct Metrics {
     provider_slo_trackers: Arc<Mutex<HashMap<String, SloTracker>>>,
     slo_target: f64,
     slot_lag_alert_slots: u64,
+    anomaly: AnomalyConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -319,6 +359,7 @@ impl Metrics {
             provider_slo_trackers: Arc::new(Mutex::new(HashMap::new())),
             slo_target: config.slo_target,
             slot_lag_alert_slots: config.slot_lag_alert_slots,
+            anomaly: AnomalyConfig::from_config(config),
         })
     }
 
@@ -335,6 +376,7 @@ impl Metrics {
             .with_label_values(&[provider])
             .set(latency_ms);
 
+        let now = SystemTime::now();
         {
             let mut guard = self.state.write().await;
             let state = guard
@@ -350,13 +392,18 @@ impl Metrics {
                 EMA_ALPHA,
                 FALLBACK_LATENCY_MS,
             );
-            state.quarantined_until = None;
-            state.last_updated = SystemTime::now();
+            if let Some(deadline) = state.quarantined_until {
+                if deadline <= now {
+                    state.quarantined_until = None;
+                }
+            }
+            state.last_updated = now;
         }
 
         self.provider_health.with_label_values(&[provider]).set(1);
 
         self.update_slo(provider, SloOutcome::Success).await;
+        self.evaluate_anomalies().await;
     }
 
     pub async fn record_request_failure(&self, provider: &str, method: &str, reason: &str) {
@@ -393,6 +440,7 @@ impl Metrics {
         }
 
         self.update_slo(provider, SloOutcome::Failure).await;
+        self.evaluate_anomalies().await;
     }
 
     async fn update_slo(&self, provider: &str, outcome: SloOutcome) {
@@ -463,6 +511,7 @@ impl Metrics {
             }
         }
 
+        let now = SystemTime::now();
         {
             let mut guard = self.state.write().await;
             let state = guard
@@ -483,8 +532,12 @@ impl Metrics {
                     state.slots.set(commitment, Some(slot));
                 }
             }
-            state.quarantined_until = None;
-            state.last_updated = SystemTime::now();
+            if let Some(deadline) = state.quarantined_until {
+                if deadline <= now {
+                    state.quarantined_until = None;
+                }
+            }
+            state.last_updated = now;
         }
 
         self.provider_health.with_label_values(&[provider]).set(1);
@@ -519,6 +572,110 @@ impl Metrics {
 
         if mark_unhealthy {
             self.provider_health.with_label_values(&[provider]).set(0);
+        }
+    }
+
+    async fn evaluate_anomalies(&self) {
+        if !self.anomaly.enabled() {
+            return;
+        }
+
+        let eligible = {
+            let state = self.state.read().await;
+            state
+                .iter()
+                .map(|(name, provider_state)| AnomalySample {
+                    name: name.clone(),
+                    latency_ms: provider_state.last_latency_ms,
+                    error_count: provider_state.request_error_count,
+                    total_requests: provider_state
+                        .request_success_count
+                        .saturating_add(provider_state.request_error_count),
+                })
+                .filter(|sample| sample.total_requests >= self.anomaly.min_requests)
+                .collect::<Vec<_>>()
+        };
+
+        if eligible.len() < self.anomaly.min_participants() {
+            return;
+        }
+
+        let mut flagged: HashMap<String, &'static str> = HashMap::new();
+
+        if self.anomaly.latency_enabled() {
+            let latency_samples: Vec<_> = eligible
+                .iter()
+                .filter_map(|sample| sample.latency_ms.map(|value| (sample.name.clone(), value)))
+                .collect();
+            if latency_samples.len() >= self.anomaly.min_participants() {
+                for name in detect_outliers(&latency_samples, self.anomaly.latency_z) {
+                    flagged.entry(name).or_insert(ANOMALY_LATENCY_REASON);
+                }
+            }
+        }
+
+        if self.anomaly.error_enabled() {
+            let error_samples: Vec<_> = eligible
+                .iter()
+                .filter(|sample| sample.total_requests > 0)
+                .map(|sample| {
+                    (
+                        sample.name.clone(),
+                        sample.error_count as f64 / sample.total_requests as f64,
+                    )
+                })
+                .collect();
+            if error_samples.len() >= self.anomaly.min_participants() {
+                for name in detect_outliers(&error_samples, self.anomaly.error_z) {
+                    flagged.insert(name, ANOMALY_ERROR_REASON);
+                }
+            }
+        }
+
+        if flagged.is_empty() {
+            return;
+        }
+
+        self.apply_anomaly_quarantines(flagged).await;
+    }
+
+    async fn apply_anomaly_quarantines(&self, flagged: HashMap<String, &'static str>) {
+        let now = SystemTime::now();
+        let release = now + self.anomaly.quarantine_duration;
+        let mut quarantined = Vec::new();
+        {
+            let mut state = self.state.write().await;
+            for (provider, reason) in flagged {
+                let snapshot = state
+                    .entry(provider.clone())
+                    .or_insert_with(ProviderState::new);
+                let already_quarantined = snapshot
+                    .quarantined_until
+                    .map(|deadline| deadline > now)
+                    .unwrap_or(false);
+                if already_quarantined {
+                    continue;
+                }
+                snapshot.healthy = false;
+                snapshot.quarantined_until = Some(release);
+                snapshot.last_updated = now;
+                quarantined.push((provider, reason));
+            }
+        }
+
+        for (provider, reason) in quarantined {
+            self.provider_health
+                .with_label_values(&[provider.as_str()])
+                .set(0);
+            self.provider_errors
+                .with_label_values(&[provider.as_str(), reason])
+                .inc();
+            tracing::warn!(
+                provider = provider.as_str(),
+                reason,
+                quarantine_seconds = self.anomaly.quarantine_duration.as_secs(),
+                "provider quarantined by anomaly detection"
+            );
         }
     }
 
@@ -1000,6 +1157,42 @@ impl Ord for ProviderPriority {
     }
 }
 
+#[derive(Clone)]
+struct AnomalySample {
+    name: String,
+    latency_ms: Option<f64>,
+    error_count: u64,
+    total_requests: u64,
+}
+
+fn detect_outliers(samples: &[(String, f64)], threshold: f64) -> Vec<String> {
+    if threshold <= 0.0 || samples.len() < 2 {
+        return Vec::new();
+    }
+
+    let mean = samples.iter().map(|(_, value)| *value).sum::<f64>() / samples.len() as f64;
+    let variance = samples
+        .iter()
+        .map(|(_, value)| {
+            let diff = *value - mean;
+            diff * diff
+        })
+        .sum::<f64>()
+        / samples.len() as f64;
+    if variance <= f64::EPSILON {
+        return Vec::new();
+    }
+    let std_dev = variance.sqrt();
+
+    samples
+        .iter()
+        .filter_map(|(name, value)| {
+            let z = (*value - mean) / std_dev;
+            (z >= threshold).then(|| name.clone())
+        })
+        .collect()
+}
+
 fn compute_slot_penalty(slots_behind: Option<u64>, penalty_per_slot: f64) -> f64 {
     if penalty_per_slot <= 0.0 {
         return 0.0;
@@ -1240,6 +1433,11 @@ mod tests {
             hedge_min_delay_ms: 10.0,
             hedge_max_delay_ms: 200.0,
             slo_target: 0.995,
+            anomaly_latency_z: 3.0,
+            anomaly_error_z: 2.5,
+            anomaly_min_providers: 3,
+            anomaly_min_requests: 50,
+            anomaly_quarantine_secs: 60,
             otel: OtelConfig {
                 exporter: OtelExporter::None,
                 service_name: "orlb-test".into(),
@@ -1436,6 +1634,91 @@ mod tests {
             .expect("public provider present");
         assert_eq!(public.tag_multiplier, 1.0);
         assert_eq!(public.effective_weight, public.weight as f64);
+    }
+
+    #[tokio::test]
+    async fn latency_anomaly_quarantines_provider() {
+        let registry = Registry::from_providers(vec![
+            provider("FastA", "https://fast-a.example.com"),
+            provider("FastB", "https://fast-b.example.com"),
+            provider("Slow", "https://slow.example.com"),
+        ])
+        .unwrap();
+        let mut config = test_config();
+        config.anomaly_latency_z = 1.0;
+        config.anomaly_error_z = 0.0;
+        config.anomaly_min_providers = 3;
+        config.anomaly_min_requests = 3;
+        config.anomaly_quarantine_secs = 120;
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry, &config).unwrap();
+
+        for _ in 0..3 {
+            metrics
+                .record_request_success("FastA", "getSlot", Duration::from_millis(40))
+                .await;
+            metrics
+                .record_request_success("FastB", "getSlot", Duration::from_millis(45))
+                .await;
+            metrics
+                .record_request_success("Slow", "getSlot", Duration::from_millis(400))
+                .await;
+        }
+
+        let snapshot = metrics.dashboard_snapshot().await;
+        let slow = snapshot
+            .providers
+            .iter()
+            .find(|p| p.name == "Slow")
+            .expect("slow provider present");
+        assert!(
+            slow.quarantined,
+            "slow provider should be quarantined by latency anomaly detection"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_rate_anomaly_quarantines_provider() {
+        let registry = Registry::from_providers(vec![
+            provider("SteadyA", "https://steady-a.example.com"),
+            provider("SteadyB", "https://steady-b.example.com"),
+            provider("Flaky", "https://flaky.example.com"),
+        ])
+        .unwrap();
+        let mut config = test_config();
+        config.anomaly_latency_z = 0.0;
+        config.anomaly_error_z = 1.0;
+        config.anomaly_min_providers = 3;
+        config.anomaly_min_requests = 4;
+        config.anomaly_quarantine_secs = 180;
+        let shared_registry = SharedRegistry::new(registry);
+        let metrics = Metrics::new(shared_registry, &config).unwrap();
+
+        for _ in 0..4 {
+            metrics
+                .record_request_success("SteadyA", "getSlot", Duration::from_millis(40))
+                .await;
+            metrics
+                .record_request_success("SteadyB", "getSlot", Duration::from_millis(45))
+                .await;
+            metrics
+                .record_request_failure("Flaky", "getSlot", "timeout")
+                .await;
+            metrics
+                .record_request_success("Flaky", "getSlot", Duration::from_millis(90))
+                .await;
+        }
+
+        let snapshot = metrics.dashboard_snapshot().await;
+        let flaky = snapshot
+            .providers
+            .iter()
+            .find(|p| p.name == "Flaky")
+            .expect("flaky provider present");
+        assert!(
+            flaky.quarantined,
+            "flaky provider should be quarantined by error-rate anomaly detection"
+        );
     }
 
     #[tokio::test]

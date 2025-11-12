@@ -989,6 +989,11 @@ mod tests {
             hedge_min_delay_ms: 10.0,
             hedge_max_delay_ms: 200.0,
             slo_target: 0.995,
+            anomaly_latency_z: 3.0,
+            anomaly_error_z: 2.5,
+            anomaly_min_providers: 3,
+            anomaly_min_requests: 50,
+            anomaly_quarantine_secs: 60,
             otel: OtelConfig {
                 exporter: OtelExporter::None,
                 service_name: "orlb-test".into(),

@@ -23,6 +23,11 @@ pub struct Config {
     pub hedge_min_delay_ms: f64,
     pub hedge_max_delay_ms: f64,
     pub slo_target: f64,
+    pub anomaly_latency_z: f64,
+    pub anomaly_error_z: f64,
+    pub anomaly_min_providers: usize,
+    pub anomaly_min_requests: u64,
+    pub anomaly_quarantine_secs: u64,
     pub otel: OtelConfig,
     pub tag_weights: HashMap<String, f64>,
     pub secrets: SecretsConfig,
@@ -126,6 +131,22 @@ impl Config {
             0.9,
             0.9999,
         );
+        let anomaly_latency_z = clamp_f64(
+            parse_env("ORLB_ANOMALY_LATENCY_Z", "3.0", parse_f64)?,
+            0.0,
+            10.0,
+        );
+        let anomaly_error_z = clamp_f64(
+            parse_env("ORLB_ANOMALY_ERROR_Z", "2.5", parse_f64)?,
+            0.0,
+            10.0,
+        );
+        let anomaly_min_providers =
+            parse_env("ORLB_ANOMALY_MIN_PROVIDERS", "3", parse_u64)?.clamp(2, 32) as usize;
+        let anomaly_min_requests =
+            parse_env("ORLB_ANOMALY_MIN_REQUESTS", "50", parse_u64)?.clamp(5, 10_000);
+        let anomaly_quarantine_secs =
+            parse_env("ORLB_ANOMALY_QUARANTINE_SECS", "60", parse_u64)?.clamp(5, 3_600);
         let otel_service_name = parse_env("ORLB_OTEL_SERVICE_NAME", "orlb", parse_string)?
             .trim()
             .to_string();
@@ -161,6 +182,11 @@ impl Config {
             hedge_min_delay_ms,
             hedge_max_delay_ms,
             slo_target,
+            anomaly_latency_z,
+            anomaly_error_z,
+            anomaly_min_providers,
+            anomaly_min_requests,
+            anomaly_quarantine_secs,
             otel: OtelConfig {
                 exporter: otel_exporter,
                 service_name: otel_service_name,

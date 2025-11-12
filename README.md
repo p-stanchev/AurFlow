@@ -12,6 +12,7 @@ ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across 
 - **Automatic retries** - read-only calls try a second provider on timeouts/429/5xx.
 - **Health probes** - background `getSlot` checks every 5s update provider status.
 - **Quarantine & backoff** - providers with sustained failures are sidelined with exponential cooldown until probes succeed.
+- **Anomaly guardrails** - z-score based latency/error detection automatically quarantines outliers for configurable cooldowns.
 - **Freshness scoring** - slot-aware penalties keep traffic on the highest-commitment providers.
 - **Commitment-aware routing** - inspects JSON-RPC commitment hints and prefers providers whose slot height satisfies processed/confirmed/finalized requirements.
 - **Tier-aware weighting** - tag providers (paid/public/foundation, etc.) and boost or de-prioritise traffic with configurable multipliers.
@@ -78,6 +79,11 @@ ORLB is configured via environment variables and a provider registry file:
 | `ORLB_DASHBOARD_DIR` | unset | Optional override directory for dashboard HTML |
 | `ORLB_SLOT_LAG_PENALTY_MS` | `5` | Weighted-score penalty (ms) applied per slot behind the freshest provider |
 | `ORLB_SLOT_LAG_ALERT_SLOTS` | `50` | `orlb doctor` warns when a provider lags this many slots |
+| `ORLB_ANOMALY_LATENCY_Z` | `3.0` | Z-score threshold before quarantining latency outliers (set <=0 to disable) |
+| `ORLB_ANOMALY_ERROR_Z` | `2.5` | Z-score threshold before quarantining error-rate outliers (set <=0 to disable) |
+| `ORLB_ANOMALY_MIN_PROVIDERS` | `3` | Minimum number of providers required before anomaly detection runs |
+| `ORLB_ANOMALY_MIN_REQUESTS` | `50` | Minimum per-provider request sample before calculating anomalies |
+| `ORLB_ANOMALY_QUARANTINE_SECS` | `60` | Cooldown window applied when anomaly detection trips |
 | `ORLB_HEDGE_REQUESTS` | `false` | Launch a hedged request when the primary read call stalls |
 | `ORLB_HEDGE_DELAY_MS` | `60` | Base delay (ms) before the hedged provider is attempted |
 | `ORLB_ADAPTIVE_HEDGING` | `true` | Enable adaptive hedging that adjusts delay based on provider latency |
@@ -357,6 +363,18 @@ Set secrets for any private provider headers or API keys. The service is statele
 - Dynamic congestion control that taps into TPU leader schedules to anticipate RPC surges and pre-emptively hedge.
 - Snapshotting `/metrics.json` into object storage for longer-term analytics without running a full Prometheus stack.
 - Managed egress relays that keep provider connections warm across multiple geographic PoPs to minimize TLS/handshake overhead.
+- Redis-backed response caching for hot read-only methods (e.g., `getLatestBlockhash`) with per-method TTL guardrails.
+- Usage metering and billing hooks that emit API-key level metrics to Stripe or internal chargeback pipelines.
+- ~~Automated anomaly detection that suppresses or quarantines providers whose latency/error bands drift beyond configured z-score thresholds.~~ (shipped)
+- Operator control plane (CLI plus dashboard tab) to live-edit weights, drain providers, and roll policies without touching JSON.
+- `orlb doctor --fix` autofixes common registry mistakes (missing headers, bad URLs) to shorten onboarding.
+- Config diff CLI (`orlb diff providers.json providers.next.json`) that previews weight changes before pushing.
+- Dashboard dark-mode toggle plus provider search/filter controls for on-call usability.
+- Sample Grafana/Alertmanager rules bundle generated via `scripts/export-observability.sh`.
+- Mock provider shim that simulates latency/HTTP faults for local chaos testing without burning RPC quotas.
+- Terraform/Helm modules that expose ORLB as a drop-in for common Kubernetes + Fly.io + Nomad stacks.
+- Audit log stream (webhook/S3) for admin actions like hot reloads, key issuance, or provider drains.
+- Provider-level budget guardrails that cut traffic or rotate to cheaper pools when spend estimates cross limits.
 
 ## License
 Apache 2.0 (or adapt as needed). Feel free to fork and extend for demos or production load-balancing.
