@@ -1,6 +1,7 @@
 mod commitment;
 mod config;
 mod dashboard;
+mod diff;
 mod doctor;
 mod errors;
 mod forward;
@@ -14,6 +15,7 @@ mod telemetry;
 mod ws;
 
 use anyhow::Result;
+use std::path::Path;
 
 use crate::config::Config;
 use crate::forward::build_http_client;
@@ -32,6 +34,17 @@ async fn main() -> Result<()> {
     let secrets = SecretManager::new(&config.secrets)?;
     let registry = Registry::load(&config.providers_path)?;
     let shared_registry = SharedRegistry::new(registry);
+
+    if matches!(subcommand.as_deref(), Some("diff")) {
+        let baseline = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("expected baseline path after `diff`"))?;
+        let candidate = args
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("expected candidate path after baseline path"))?;
+        diff::run(Path::new(&baseline), Path::new(&candidate))?;
+        return Ok(());
+    }
 
     if matches!(subcommand.as_deref(), Some("doctor")) {
         doctor::run(config.clone(), shared_registry.snapshot(), secrets.clone()).await?;

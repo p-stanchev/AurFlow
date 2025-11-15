@@ -20,6 +20,7 @@ ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across 
 - **Subscription fan-out** - `/ws` WebSocket endpoint mirrors subscriptions to multiple healthy upstreams.
 - **Observability** - `/metrics` (Prometheus text) and `/metrics.json` plus `/dashboard` (Chart.js) showing live scores.
 - **Doctor CLI** - `orlb doctor` lints the registry, validates headers, and probes each upstream before you deploy.
+- **Config diff CLI** - `orlb diff providers.json providers.next.json` previews provider pool changes before rollout.
 - **Simple ops** - single binary with embedded dashboard, configurable via env vars, ships with Dockerfile and CI.
 - **Hot reloads** - `/admin/providers` swaps in new provider registries without restarting and can optionally persist to `providers.json`.
 
@@ -204,6 +205,9 @@ This keeps API keys out of source control while still letting you ship a single 
 ### Diagnostics
 Run `cargo run -- doctor` (or the compiled binary with `orlb doctor`) to lint the provider registry and perform live reachability probes. The command flags duplicate names/URLs, invalid headers, zero weights, stale commitment (providers lagging more than `ORLB_SLOT_LAG_ALERT_SLOTS` slots), and transport/HTTP failures. A non-zero exit status indicates issues that should be fixed before deploying.
 
+### Config diffs
+`cargo run -- diff providers.current.json providers.next.json` (or `orlb diff ...`) compares two registry files before you hot-reload or redeploy. The tool reports providers that were added/removed and highlights field-level changes to URL, weight, tags, headers, WebSocket URL, and sample signature so you can audit planned edits before they ship.
+
 ### Deterministic replays
 `orlb replay path/to/bundle.json` reissues archived JSON-RPC calls against every configured provider and compares their responses (or an `expected` payload you captured earlier). The bundle is a JSON array:
 
@@ -365,10 +369,10 @@ Set secrets for any private provider headers or API keys. The service is statele
 - Managed egress relays that keep provider connections warm across multiple geographic PoPs to minimize TLS/handshake overhead.
 - Redis-backed response caching for hot read-only methods (e.g., `getLatestBlockhash`) with per-method TTL guardrails.
 - Usage metering and billing hooks that emit API-key level metrics to Stripe or internal chargeback pipelines.
-- ~~Automated anomaly detection that suppresses or quarantines providers whose latency/error bands drift beyond configured z-score thresholds.~~ (shipped)
+- ~~Automated anomaly detection that suppresses or quarantines providers whose latency/error bands drift beyond configured z-score thresholds.~~ ✅
 - Operator control plane (CLI plus dashboard tab) to live-edit weights, drain providers, and roll policies without touching JSON.
 - `orlb doctor --fix` autofixes common registry mistakes (missing headers, bad URLs) to shorten onboarding.
-- Config diff CLI (`orlb diff providers.json providers.next.json`) that previews weight changes before pushing.
+- ~~Config diff CLI (`orlb diff providers.json providers.next.json`) that previews weight changes before pushing.~~ ✅
 - Dashboard dark-mode toggle plus provider search/filter controls for on-call usability.
 - Sample Grafana/Alertmanager rules bundle generated via `scripts/export-observability.sh`.
 - Mock provider shim that simulates latency/HTTP faults for local chaos testing without burning RPC quotas.
