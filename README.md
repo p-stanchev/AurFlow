@@ -5,9 +5,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/p-stanchev/AurFlow/actions/workflows/ci.yml">
-    <img src="https://github.com/p-stanchev/AurFlow/workflows/CI/badge.svg" alt="Build Status" />
-  </a>
   <a href="https://github.com/p-stanchev/AurFlow/releases">
     <img src="https://img.shields.io/github/v/release/p-stanchev/AurFlow?include_prereleases" alt="Latest Release" />
   </a>

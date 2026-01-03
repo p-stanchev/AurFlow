@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -24,6 +25,7 @@ const FALLBACK_LATENCY_MS: f64 = 400.0;
 const FAILURE_HEALTH_THRESHOLD: u32 = 3;
 const QUARANTINE_BASE_SECS: u64 = 15;
 const QUARANTINE_MAX_SECS: u64 = 300;
+const SLO_TRACKER_SHARDS: usize = 16;
 const SLO_BUCKET_WIDTH: Duration = Duration::from_secs(10);
 const SLO_WINDOWS: &[(&str, Duration)] = &[
     ("5m", Duration::from_secs(300)),
@@ -102,6 +104,37 @@ impl AnomalyConfig {
     }
 }
 
+struct ShardedSloTrackers {
+    shards: Vec<Mutex<HashMap<String, SloTracker>>>,
+}
+
+impl ShardedSloTrackers {
+    fn new(shards: usize) -> Self {
+        let count = shards.max(1);
+        let mut vec = Vec::with_capacity(count);
+        for _ in 0..count {
+            vec.push(Mutex::new(HashMap::new()));
+        }
+        Self { shards: vec }
+    }
+
+    fn shard_count(&self) -> usize {
+        self.shards.len()
+    }
+
+    fn shard_index(&self, provider: &str) -> usize {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        provider.hash(&mut hasher);
+        let hash = hasher.finish() as usize;
+        hash % self.shards.len()
+    }
+
+    fn shard(&self, provider: &str) -> &Mutex<HashMap<String, SloTracker>> {
+        let idx = self.shard_index(provider);
+        &self.shards[idx]
+    }
+}
+
 #[derive(Clone)]
 pub struct Metrics {
     registry: SharedRegistry,
@@ -127,7 +160,7 @@ pub struct Metrics {
     round_robin_cursor: Arc<AtomicUsize>,
     slot_lag_penalty_ms: f64,
     slo_tracker: Arc<Mutex<SloTracker>>,
-    provider_slo_trackers: Arc<Mutex<HashMap<String, SloTracker>>>,
+    provider_slo_trackers: Arc<ShardedSloTrackers>,
     slo_target: f64,
     slot_lag_alert_slots: u64,
     anomaly: AnomalyConfig,
@@ -356,7 +389,7 @@ impl Metrics {
             round_robin_cursor: Arc::new(AtomicUsize::new(0)),
             slot_lag_penalty_ms: config.slot_lag_penalty_ms.max(0.0),
             slo_tracker,
-            provider_slo_trackers: Arc::new(Mutex::new(HashMap::new())),
+            provider_slo_trackers: Arc::new(ShardedSloTrackers::new(SLO_TRACKER_SHARDS)),
             slo_target: config.slo_target,
             slot_lag_alert_slots: config.slot_lag_alert_slots,
             anomaly: AnomalyConfig::from_config(config),
@@ -465,7 +498,8 @@ impl Metrics {
         }
 
         let provider_snapshots = {
-            let mut trackers = self.provider_slo_trackers.lock().await;
+            let shard = self.provider_slo_trackers.shard(provider);
+            let mut trackers = shard.lock().await;
             let tracker = trackers
                 .entry(provider.to_string())
                 .or_insert_with(|| SloTracker::new(self.slo_target));
@@ -962,12 +996,20 @@ impl Metrics {
         }
 
         {
-            let mut trackers = self.provider_slo_trackers.lock().await;
-            trackers.retain(|name, _| provider_names.contains(name));
+            let mut by_shard: Vec<Vec<String>> =
+                vec![Vec::new(); self.provider_slo_trackers.shard_count()];
             for name in provider_names.iter() {
-                trackers
-                    .entry(name.clone())
-                    .or_insert_with(|| SloTracker::new(self.slo_target));
+                let idx = self.provider_slo_trackers.shard_index(name);
+                by_shard[idx].push(name.clone());
+            }
+            for (idx, names) in by_shard.into_iter().enumerate() {
+                let mut trackers = self.provider_slo_trackers.shards[idx].lock().await;
+                trackers.retain(|name, _| provider_names.contains(name));
+                for name in names {
+                    trackers
+                        .entry(name)
+                        .or_insert_with(|| SloTracker::new(self.slo_target));
+                }
             }
         }
 
