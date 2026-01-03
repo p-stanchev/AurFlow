@@ -4,6 +4,24 @@
   <img src="static/aurflow.png" alt="AurFlow logo" width="200" />
 </p>
 
+<p align="center">
+  <a href="https://github.com/p-stanchev/AurFlow/actions/workflows/ci.yml">
+    <img src="https://github.com/p-stanchev/AurFlow/workflows/CI/badge.svg" alt="Build Status" />
+  </a>
+  <a href="https://github.com/p-stanchev/AurFlow/releases">
+    <img src="https://img.shields.io/github/v/release/p-stanchev/AurFlow?include_prereleases" alt="Latest Release" />
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" />
+  </a>
+  <a href="https://www.rust-lang.org/">
+    <img src="https://img.shields.io/badge/rust-1.82%2B-orange.svg" alt="Rust Version" />
+  </a>
+  <a href="https://github.com/p-stanchev/AurFlow/issues">
+    <img src="https://img.shields.io/github/issues/p-stanchev/AurFlow" alt="GitHub Issues" />
+  </a>
+</p>
+
 ORLB is a lightweight JSON-RPC proxy for Solana that fans client traffic across multiple upstream RPC providers. It continuously probes each provider, scores them on latency and error rate, retries idempotent calls once, and exposes live Prometheus metrics plus a web dashboard. The goal of this MVP is to prove dependable routing with public RPCs in a single-container deploy.
 
 ## Core Capabilities

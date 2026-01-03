@@ -125,19 +125,25 @@ impl ProviderConcurrency {
     }
 
     fn reload(&self, providers: &[Provider]) {
-        let mut guard = self
-            .limits
-            .write()
-            .expect("provider concurrency lock poisoned");
+        let mut guard = match self.limits.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("provider concurrency lock was poisoned, recovering");
+                poisoned.into_inner()
+            }
+        };
         *guard = Self::build_map(providers);
     }
 
     async fn acquire(&self, provider_name: &str) -> OwnedSemaphorePermit {
         let semaphore = {
-            let guard = self
-                .limits
-                .read()
-                .expect("provider concurrency lock poisoned");
+            let guard = match self.limits.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!("provider concurrency lock was poisoned, recovering");
+                    poisoned.into_inner()
+                }
+            };
             guard.get(provider_name).cloned()
         }
         .expect("missing semaphore for provider");
